@@ -16,7 +16,7 @@ if (-not $Version) {
     }
   }
 }
-if (-not $Version) { $Version = "v0.2.0" }
+if (-not $Version) { $Version = "v0.2.1" }
 
 $Target = "x86_64-pc-windows-msvc"
 $Asset = "fast-n-rust-$Version-$Target.zip"

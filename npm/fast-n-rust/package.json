@@ -1,6 +1,6 @@
 {
   "name": "fast-n-rust",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Rewrite the 5% that's slow — or lift the whole app to pure Rust. Proven against real behavior at every step.",
   "license": "MIT",
   "repository": {
@@ -18,15 +18,15 @@
     "test": "node --test bin/fast-n-rust.test.js"
   },
   "files": [
-    "bin/",
+    "bin/fast-n-rust.js",
     "install.js"
   ],
   "optionalDependencies": {
-    "@fast-n-rust/linux-x64": "0.2.0",
-    "@fast-n-rust/linux-arm64": "0.2.0",
-    "@fast-n-rust/darwin-arm64": "0.2.0",
-    "@fast-n-rust/darwin-x64": "0.2.0",
-    "@fast-n-rust/win32-x64": "0.2.0"
+    "@fast-n-rust/linux-x64": "0.2.1",
+    "@fast-n-rust/linux-arm64": "0.2.1",
+    "@fast-n-rust/darwin-arm64": "0.2.1",
+    "@fast-n-rust/darwin-x64": "0.2.1",
+    "@fast-n-rust/win32-x64": "0.2.1"
   },
   "engines": {
     "node": ">=18"
