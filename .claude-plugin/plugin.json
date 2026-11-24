@@ -1,6 +1,6 @@
 {
   "name": "fast-n-rust",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Rewrite the 5% that's slow — or lift the whole app to pure Rust. Proven against real behavior across 14 languages.",
   "license": "MIT",
   "keywords": [

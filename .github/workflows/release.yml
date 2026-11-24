@@ -52,7 +52,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
             TAG="${GITHUB_REF_NAME}"
           else
-            TAG="v0.2.1"
+            TAG="v0.2.2"
           fi
           NAME="fast-n-rust-${TAG}-${{ matrix.target }}"
           mkdir -p dist/stage

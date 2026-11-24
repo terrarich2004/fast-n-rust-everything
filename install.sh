@@ -10,7 +10,7 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 Install fast-n-rust (fnr) prebuilt binaries on Linux or macOS.
 
 Environment variables:
-  FNR_VERSION      Release tag (e.g. v0.2.1). Defaults to latest GitHub release.
+  FNR_VERSION      Release tag (e.g. v0.2.2). Defaults to latest GitHub release.
   FNR_INSTALL_DIR  Destination directory (default: \$HOME/.local/bin).
   FNR_REPO         GitHub owner/repo (default: terrarich2004/fast-n-rust-everything).
 EOF
@@ -52,7 +52,7 @@ if [ -z "$VERSION" ]; then
   LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)"
   case "$LATEST_URL" in
     */tag/*) VERSION="${LATEST_URL##*/tag/}" ;;
-    *) VERSION="v0.2.1" ;;
+    *) VERSION="v0.2.2" ;;
   esac
 fi
 
