@@ -222,7 +222,27 @@ pub fn enrich_task_md(root: &Path, crate_dir: &Path, hs: &Hotspot, lang: FastLan
 pub enum RecommendedMode {
     FastHotspot,
     BatchHotLoop,
+    OptimizeIoFirst,
+    ExtractPureHelper,
     WholeApp,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosisHint {
+    pub function: String,
+    pub file: String,
+    pub line: u32,
+    pub share: f64,
+    pub category: String,
+    pub suggestion: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BottleneckDiagnosis {
+    pub portable_cpu_share: f64,
+    pub io_or_async_share: f64,
+    pub refactorable_share: f64,
+    pub hints: Vec<DiagnosisHint>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -231,9 +251,97 @@ pub struct ModeAdvice {
     pub headline: String,
     pub next_command: String,
     pub top_portable_share: f64,
+    pub diagnosis: BottleneckDiagnosis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_mcp_action: Option<serde_json::Value>,
 }
 
-/// Recommends the best strategy (`fast` 5% hotspot, `--batch` Rayon escalation, or `whole-app` lift)
+fn classify_blocker(h: &Hotspot) -> Option<(&'static str, String)> {
+    let primary = h.blockers.first()?.as_str();
+    if primary.contains("lives in the entry script") {
+        Some((
+            "entry_guard",
+            format!(
+                "`{}` lives at top level of `{}`. Wrap the runner code in `if __name__ == \"__main__\":` (Python) or `if (import.meta.main)` (JS/TS) so `{}` becomes portable.",
+                h.id, h.file, h.name
+            ),
+        ))
+    } else if primary.contains("mutates self")
+        || primary.contains("mutates this")
+        || primary.contains("calls methods on self")
+        || primary.contains("calls methods on this")
+        || primary.contains("passes self")
+        || primary.contains("passes this")
+    {
+        Some((
+            "stateful_method",
+            format!(
+                "`{}` cannot cross FFI because it `{primary}`. Extract the pure computation into a standalone helper taking plain inputs and returning the result.",
+                h.id
+            ),
+        ))
+    } else if primary.starts_with("does I/O") || primary.contains("I/O") {
+        Some((
+            "io",
+            format!(
+                "`{}` is blocked by I/O ({primary}). Porting to Rust won't speed up DB/network/disk waits — batch queries, cache results, or parallelize I/O instead.",
+                h.id
+            ),
+        ))
+    } else if primary == "async" {
+        Some((
+            "async",
+            format!(
+                "`{}` is async. Rust FFI won't accelerate awaited network/DB calls; if it contains heavy synchronous CPU loops/parsing, extract that pure sync block into a separate helper and re-scan.",
+                h.id
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
+fn diagnose_bottlenecks(scan: &ScanOut, top_portable_share: f64) -> BottleneckDiagnosis {
+    let mut blocked: Vec<&Hotspot> = scan
+        .hotspots
+        .iter()
+        .filter(|h| !h.portable() && h.share >= 0.05)
+        .collect();
+    blocked.sort_by(|a, b| b.share.total_cmp(&a.share));
+
+    let mut io_or_async_share = 0.0_f64;
+    let mut refactorable_share = 0.0_f64;
+    let mut hints = Vec::new();
+
+    for h in blocked {
+        if let Some((cat, suggestion)) = classify_blocker(h) {
+            if matches!(cat, "io" | "async") {
+                io_or_async_share = io_or_async_share.max(h.share).min(1.0);
+            } else if matches!(cat, "entry_guard" | "stateful_method") {
+                refactorable_share = refactorable_share.max(h.share).min(1.0);
+            }
+            if hints.len() < 3 {
+                hints.push(DiagnosisHint {
+                    function: h.id.clone(),
+                    file: h.file.clone(),
+                    line: h.line,
+                    share: h.share,
+                    category: cat.to_string(),
+                    suggestion,
+                });
+            }
+        }
+    }
+
+    BottleneckDiagnosis {
+        portable_cpu_share: top_portable_share,
+        io_or_async_share,
+        refactorable_share,
+        hints,
+    }
+}
+
+/// Recommends the best strategy (`fast`, `--batch`, `extract_pure_helper`, `optimize_io_first`, or `whole_app`)
 /// from a `scan` profile.
 pub fn advise_mode(scan: &ScanOut) -> ModeAdvice {
     let portable: Vec<&Hotspot> = scan.hotspots.iter().filter(|h| h.worth_it()).collect();
@@ -242,6 +350,7 @@ pub fn advise_mode(scan: &ScanOut) -> ModeAdvice {
         .map(|h| h.share)
         .fold(0.0_f64, f64::max)
         .min(1.0);
+    let diagnosis = diagnose_bottlenecks(scan, top_share);
 
     if let Some(loop_hs) = portable.iter().find(|h| {
         h.ffi_budget_ratio() > 0.25
@@ -266,6 +375,11 @@ pub fn advise_mode(scan: &ScanOut) -> ModeAdvice {
                 loop_hs.id, loop_hs.name
             ),
             top_portable_share: top_share,
+            diagnosis,
+            next_mcp_action: Some(serde_json::json!({
+                "tool": "scaffold",
+                "arguments": { "action": "port", "id": loop_hs.id }
+            })),
         };
     }
 
@@ -281,18 +395,70 @@ pub fn advise_mode(scan: &ScanOut) -> ModeAdvice {
                 "Top portable hotspot(s) cover up to {:.1}% of runtime{direct_note} — ideal 5% Rust speedup target.",
                 top_share * 100.0
             ),
-            next_command: format!(
-                "fnr port {}  (or `fnr go --agent claude -- ...`)",
-                portable[0].id
-            ),
+            next_command: format!("fnr port {}", portable[0].id),
             top_portable_share: top_share,
+            diagnosis,
+            next_mcp_action: Some(serde_json::json!({
+                "tool": "scaffold",
+                "arguments": { "action": "port", "id": portable[0].id }
+            })),
         };
+    }
+
+    if portable.is_empty() {
+        if let Some(refactor_hint) = diagnosis
+            .hints
+            .iter()
+            .find(|h| h.category == "entry_guard" || h.category == "stateful_method")
+            && diagnosis.refactorable_share >= diagnosis.io_or_async_share
+        {
+            let cmd = if scan.command.is_empty() {
+                "<cmd>".to_string()
+            } else {
+                scan.command.join(" ")
+            };
+            return ModeAdvice {
+                mode: RecommendedMode::ExtractPureHelper,
+                headline: format!(
+                    "Top hotspot `{}` ({:.1}%) is blocked by a fixable code-structure issue (`{}`). Refactor it into a pure helper or add a main guard, then re-scan.",
+                    refactor_hint.function,
+                    refactor_hint.share * 100.0,
+                    refactor_hint.category
+                ),
+                next_command: format!(
+                    "Apply the refactor hint above, then re-run: fnr scan -- {cmd}"
+                ),
+                top_portable_share: top_share,
+                diagnosis,
+                next_mcp_action: None,
+            };
+        }
+
+        if let Some(io_hint) = diagnosis
+            .hints
+            .iter()
+            .find(|h| h.category == "io" || h.category == "async")
+        {
+            return ModeAdvice {
+                mode: RecommendedMode::OptimizeIoFirst,
+                headline: format!(
+                    "No portable CPU hotspot >=2% — dominant time ({:.1}%) is spent in I/O or async waits (`{}`). Rust FFI won't speed up network/DB waits; cache, batch queries, or parallelize I/O first.",
+                    io_hint.share * 100.0,
+                    io_hint.function
+                ),
+                next_command: String::new(),
+                top_portable_share: top_share,
+                diagnosis,
+                next_mcp_action: None,
+            };
+        }
     }
 
     ModeAdvice {
         mode: RecommendedMode::WholeApp,
         headline: if portable.is_empty() {
-            "No isolated pure hotspot >=2% stood out (or helpers do I/O). Consider incremental whole-app migration.".to_string()
+            "No isolated pure hotspot >=2% stood out. Consider incremental whole-app migration."
+                .to_string()
         } else {
             format!(
                 "Runtime is spread across many functions (top portable = {:.1}%). Consider incremental whole-app migration.",
@@ -301,6 +467,11 @@ pub fn advise_mode(scan: &ScanOut) -> ModeAdvice {
         },
         next_command: "fnr analyze . --whole-app  &&  fnr app record . -- <cmd>".to_string(),
         top_portable_share: top_share,
+        diagnosis,
+        next_mcp_action: Some(serde_json::json!({
+            "tool": "inspect",
+            "arguments": { "action": "analyze", "whole_app": true }
+        })),
     }
 }
 
@@ -2583,6 +2754,38 @@ mod tests {
             hotspots: vec![sample_hs("app.small", 0.10, 5, 0.2)],
         };
         assert_eq!(advise_mode(&flat_scan).mode, RecommendedMode::WholeApp);
+
+        let mut io_hs = sample_hs("app.fetch_rows", 0.75, 20, 1.5);
+        io_hs.portability = 0.0;
+        io_hs.line = 42;
+        io_hs.blockers = vec!["does I/O: requests".into()];
+        let io_scan = ScanOut {
+            command: vec!["python3".into(), "app.py".into()],
+            wall: 2.0,
+            hotspots: vec![io_hs],
+        };
+        let io_adv = advise_mode(&io_scan);
+        assert_eq!(io_adv.mode, RecommendedMode::OptimizeIoFirst);
+        assert!(io_adv.next_command.is_empty());
+        assert!(io_adv.next_mcp_action.is_none());
+        assert_eq!(io_adv.diagnosis.hints[0].category, "io");
+        assert!(io_adv.diagnosis.io_or_async_share >= 0.75);
+
+        let mut guard_hs = sample_hs("__main__.crunch", 0.85, 1, 1.7);
+        guard_hs.portability = 0.0;
+        guard_hs.line = 12;
+        guard_hs.blockers = vec![
+            "lives in the entry script, which runs on import: put that code under if __name__ == '__main__':".into(),
+        ];
+        let guard_scan = ScanOut {
+            command: vec!["python3".into(), "app.py".into()],
+            wall: 2.0,
+            hotspots: vec![guard_hs],
+        };
+        let guard_adv = advise_mode(&guard_scan);
+        assert_eq!(guard_adv.mode, RecommendedMode::ExtractPureHelper);
+        assert_eq!(guard_adv.diagnosis.hints[0].category, "entry_guard");
+        assert!(guard_adv.next_command.contains("python3 app.py"));
     }
 
     #[test]

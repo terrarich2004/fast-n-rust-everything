@@ -744,7 +744,19 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             } else {
                 fnr_fast::show::scan(&out);
                 println!("\nMode Advisor: {}", advice.headline);
-                println!("  → {}", advice.next_command);
+                for hint in &advice.diagnosis.hints {
+                    println!(
+                        "  [{}] {}:{} ({:.1}%) — {}",
+                        hint.category,
+                        hint.file,
+                        hint.line,
+                        hint.share * 100.0,
+                        hint.suggestion
+                    );
+                }
+                if !advice.next_command.is_empty() {
+                    println!("  → {}", advice.next_command);
+                }
             }
         }
         Cmd::Port {
