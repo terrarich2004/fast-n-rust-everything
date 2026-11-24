@@ -18,7 +18,16 @@ pub struct ScanOut {
     pub hotspots: Vec<Hotspot>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScanOptions {
+    pub duration_secs: Option<u64>,
+}
+
 pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
+    scan_with_options(root, command, ScanOptions::default())
+}
+
+pub fn scan_with_options(root: &Path, command: Vec<String>, opts: ScanOptions) -> Result<ScanOut> {
     ensure!(
         !command.is_empty(),
         "put the command that runs your app after --, e.g.  fnr scan -- python app.py"
@@ -61,7 +70,14 @@ pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
     let lang = crate::kotlin::refine(lang, &command[0], &ctx.root);
     let exe = lang.resolve(&command[0], &ctx.root)?;
     ui::step(format!("profiling {}", ui::bold(command.join(" "))));
-    let profile = lang.profile(&ctx, &exe, &command[1..])?;
+    let profile = lang.profile_with_options(
+        &ctx,
+        &exe,
+        &command[1..],
+        crate::backend::ProfileOptions {
+            duration_secs: opts.duration_secs,
+        },
+    )?;
     let hotspots = hotspot::rank(profile.functions, profile.wall);
     ctx.state.command = command.clone();
     ctx.state.lang = lang;

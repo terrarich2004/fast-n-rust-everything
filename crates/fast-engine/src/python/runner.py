@@ -786,19 +786,44 @@ def project_relative(root, path):
 # ------------------------------------------------------------------ modes
 
 def cmd_profile(job, argv):
+    import _thread
     import cProfile
     import pstats
+    import signal
+    import threading
 
     kind, target, rest = parse_target(argv)
     entry, base = prepare_path(kind, target)
     root = job["root"]
+    duration = job.get("duration")
+    timers = []
+    if isinstance(duration, (int, float)) and duration > 0:
+        def _soft_stop():
+            try:
+                signal.raise_signal(signal.SIGINT)
+            except Exception:
+                _thread.interrupt_main()
+
+        t1 = threading.Timer(float(duration), _soft_stop)
+        t1.daemon = True
+        t1.start()
+        timers.append(t1)
+        t2 = threading.Timer(float(duration) + 2.0, _thread.interrupt_main)
+        t2.daemon = True
+        t2.start()
+        timers.append(t2)
+
     prof = cProfile.Profile()
     sys.modules["_fast_anything_state"] = ChildState("profile", os.environ.get("FAST_ANYTHING_CHILDREN", ""))
     start = time.perf_counter()
     prof.enable()
     try:
         run_target(kind, target, rest)
+    except KeyboardInterrupt:
+        pass
     finally:
+        for t in timers:
+            t.cancel()
         prof.disable()
     wall = time.perf_counter() - start
     del sys.modules["_fast_anything_state"]

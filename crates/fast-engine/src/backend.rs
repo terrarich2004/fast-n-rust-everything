@@ -29,6 +29,11 @@ pub enum Lang {
     Kotlin,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProfileOptions {
+    pub duration_secs: Option<u64>,
+}
+
 #[derive(Deserialize)]
 pub struct Profile {
     pub wall: f64,
@@ -143,17 +148,37 @@ impl Lang {
     }
 
     pub fn profile(self, ctx: &Ctx, exe: &str, args: &[String]) -> Result<Profile> {
+        self.profile_with_options(ctx, exe, args, ProfileOptions::default())
+    }
+
+    pub fn profile_with_options(
+        self,
+        ctx: &Ctx,
+        exe: &str,
+        args: &[String],
+        opts: ProfileOptions,
+    ) -> Result<Profile> {
         match self {
-            Lang::Python => python::profile(ctx, exe, args),
-            Lang::Node => node::profile(ctx, exe, args),
-            Lang::Ruby => ruby::profile(ctx, exe, args),
-            Lang::Java => java::profile(ctx, exe, args),
-            Lang::Go => golang::profile(ctx, exe, args),
-            Lang::Php => php::profile(ctx, exe, args),
-            Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self),
-            Lang::CSharp => csharp::profile(ctx, exe, args),
-            Lang::R => r::profile(ctx, exe, args),
-            Lang::Kotlin => kotlin::profile(ctx, exe, args),
+            Lang::Python => python::profile_with_options(ctx, exe, args, opts),
+            Lang::Node => node::profile_with_options(ctx, exe, args, opts),
+            other => {
+                if opts.duration_secs.is_some() {
+                    bail!(
+                        "--duration timed profiling is currently supported for Python, Node.js, and Bun"
+                    );
+                }
+                match other {
+                    Lang::Ruby => ruby::profile(ctx, exe, args),
+                    Lang::Java => java::profile(ctx, exe, args),
+                    Lang::Go => golang::profile(ctx, exe, args),
+                    Lang::Php => php::profile(ctx, exe, args),
+                    Lang::C | Lang::Cpp => cfamily::profile(ctx, exe, args, self),
+                    Lang::CSharp => csharp::profile(ctx, exe, args),
+                    Lang::R => r::profile(ctx, exe, args),
+                    Lang::Kotlin => kotlin::profile(ctx, exe, args),
+                    Lang::Python | Lang::Node => unreachable!(),
+                }
+            }
         }
     }
 

@@ -113,6 +113,9 @@ pub enum Cmd {
         /// C/C++ compile_commands.json path (for CMake/Meson/Ninja/Make projects).
         #[arg(long)]
         cdb: Option<PathBuf>,
+        /// Stop profiling after N seconds (for servers, bots, and long-running apps on Python, Node, or Bun).
+        #[arg(long)]
+        duration: Option<u64>,
         /// Print machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -710,7 +713,12 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             fnr_fast::native::replay(&job)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Cmd::Scan { cdb, json, command } => {
+        Cmd::Scan {
+            cdb,
+            duration,
+            json,
+            command,
+        } => {
             let command = if let Some(cdb_path) = cdb {
                 fnr_fast::cfamily::command_from_cdb(&resolve_in(root, &cdb_path), &command)?
             } else {
@@ -720,7 +728,13 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                 );
                 command
             };
-            let out = fnr_fast::pipeline::scan(root, command)?;
+            let out = fnr_fast::pipeline::scan_with_options(
+                root,
+                command,
+                fnr_fast::pipeline::ScanOptions {
+                    duration_secs: duration,
+                },
+            )?;
             let advice = synergy::advise_mode(&out);
             if json {
                 println!(
@@ -1913,6 +1927,17 @@ mod tests {
 
         let doc_all = Cli::try_parse_from(["fnr", "doctor", "--all"]).unwrap();
         assert!(matches!(doc_all.cmd, Cmd::Doctor { all: true, .. }));
+
+        let scan_dur =
+            Cli::try_parse_from(["fnr", "scan", "--duration", "5", "--", "python", "app.py"])
+                .unwrap();
+        assert!(matches!(
+            scan_dur.cmd,
+            Cmd::Scan {
+                duration: Some(5),
+                ..
+            }
+        ));
 
         for hidden in [
             vec!["fnr", "analyze", "."],

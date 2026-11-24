@@ -93,7 +93,7 @@ pub fn resolve(program: &str, root: &Path) -> Result<String> {
     let (args, minimum): (&[&str], u32) = match runtime {
         Runtime::Node => (
             &["-p", "process.execPath + '\\n' + process.versions.node"],
-            22,
+            20,
         ),
         Runtime::Bun => (&["-p", "process.execPath + '\\n' + Bun.version"], 1),
         Runtime::Deno => (
@@ -167,12 +167,7 @@ fn split_script_words(cmd: &str) -> Option<Vec<String>> {
     while let Some(c) = chars.next() {
         match quote {
             Some(q) if c == q => quote = None,
-            Some('\\') => {
-                if let Some(next) = chars.next() {
-                    cur.push(next);
-                }
-            }
-            Some(_) if c == '\\' => {
+            Some('"') if c == '\\' => {
                 if let Some(next) = chars.next() {
                     cur.push(next);
                 }
@@ -422,28 +417,67 @@ fn runner(ctx: &Ctx, node: &str, mode: &str, job: Value) -> Result<Output> {
 }
 
 pub fn profile(ctx: &Ctx, node: &str, args: &[String]) -> Result<Profile> {
+    profile_with_options(ctx, node, args, crate::backend::ProfileOptions::default())
+}
+
+pub fn profile_with_options(
+    ctx: &Ctx,
+    node: &str,
+    args: &[String],
+    opts: crate::backend::ProfileOptions,
+) -> Result<Profile> {
     let script = entry(args).context("name the script to run, e.g.  fnr scan -- node app.js")?;
     let dir = ctx.fast.join("cpuprof");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
     let runtime = runtime_of(node);
     let dir_text = dir.to_string_lossy().into_owned();
-    let out = output(
-        Command::new(node)
-            .args(runtime.with(
-                &[
-                    "--cpu-prof",
-                    "--cpu-prof-interval",
-                    "250",
-                    "--cpu-prof-dir",
-                    &dir_text,
-                ],
-                args,
-            ))
-            .current_dir(&ctx.root)
-            .stdin(Stdio::null()),
-        runtime.name(),
-    )?;
+    let mut prof_opts = vec![
+        "--cpu-prof".to_string(),
+        "--cpu-prof-interval".to_string(),
+        "250".to_string(),
+        "--cpu-prof-dir".to_string(),
+        dir_text,
+    ];
+    let mut duration_ms: Option<String> = None;
+    if let Some(secs) = opts.duration_secs {
+        ensure!(secs > 0, "--duration must be at least 1 second");
+        let timer = ctx.fast.join("stop-timer.cjs");
+        fs::write(
+            &timer,
+            "const ms = Number(process.env.FNR_PROFILE_DURATION_MS || 0);\n\
+             if (ms > 0) {\n\
+               const t = setTimeout(() => { process.exitCode = 0; process.exit(0); }, ms);\n\
+               if (t && typeof t.unref === 'function') t.unref();\n\
+             }\n",
+        )?;
+        let timer_text = timer.to_string_lossy().into_owned();
+        match runtime {
+            Runtime::Node => {
+                prof_opts.push("--require".to_string());
+                prof_opts.push(timer_text);
+            }
+            Runtime::Bun => {
+                prof_opts.push("--preload".to_string());
+                prof_opts.push(timer_text);
+            }
+            Runtime::Deno => {
+                bail!(
+                    "--duration timed profiling is currently supported for Python, Node.js, and Bun"
+                );
+            }
+        }
+        duration_ms = Some((secs * 1000).to_string());
+    }
+    let prof_refs: Vec<&str> = prof_opts.iter().map(String::as_str).collect();
+    let mut cmd = Command::new(node);
+    cmd.args(runtime.with(&prof_refs, args))
+        .current_dir(&ctx.root)
+        .stdin(Stdio::null());
+    if let Some(ms) = &duration_ms {
+        cmd.env("FNR_PROFILE_DURATION_MS", ms);
+    }
+    let out = output(&mut cmd, runtime.name())?;
     ensure!(
         out.status.success(),
         "the app failed ({}):\n{}",
@@ -1643,6 +1677,55 @@ mod tests {
                 .last()
                 .map(String::as_str),
             Some("app.ts")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn timed_profile_stops_long_running_node_script() {
+        if !Command::new("node")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            eprintln!("no node on PATH, skipping");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fnr-node-dur-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("server.mjs"),
+            r#"export function spin(n) {
+  let s = 0;
+  for (let i = 0; i < n; i++) s = (s + i * 3) | 0;
+  return s;
+}
+const timer = setInterval(() => { spin(5000000); }, 5);
+setTimeout(() => { clearInterval(timer); }, 30000);
+"#,
+        )
+        .unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let start = std::time::Instant::now();
+        let prof = profile_with_options(
+            &ctx,
+            "node",
+            &["server.mjs".to_string()],
+            crate::backend::ProfileOptions {
+                duration_secs: Some(1),
+            },
+        )
+        .unwrap();
+        assert!(
+            start.elapsed().as_secs_f64() < 10.0,
+            "timed profile should stop early, elapsed={:?}",
+            start.elapsed()
+        );
+        assert!(
+            prof.functions.iter().any(|f| f.name == "spin"),
+            "expected `spin` in timed profile, got: {:?}",
+            prof.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
         let _ = fs::remove_dir_all(&dir);
     }

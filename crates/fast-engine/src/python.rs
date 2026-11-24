@@ -221,12 +221,29 @@ fn watch_workers(
 }
 
 pub fn profile(ctx: &Ctx, python: &str, app_args: &[String]) -> Result<Profile> {
+    profile_with_options(
+        ctx,
+        python,
+        app_args,
+        crate::backend::ProfileOptions::default(),
+    )
+}
+
+pub fn profile_with_options(
+    ctx: &Ctx,
+    python: &str,
+    app_args: &[String],
+    opts: crate::backend::ProfileOptions,
+) -> Result<Profile> {
+    if opts.duration_secs == Some(0) {
+        bail!("--duration must be at least 1 second");
+    }
     let out = ctx.fast.join("profile.json");
     helper(
         ctx,
         python,
         "profile",
-        json!({ "root": ctx.root, "out": out, "max": 40 }),
+        json!({ "root": ctx.root, "out": out, "max": 40, "duration": opts.duration_secs }),
         app_args,
     )?;
     serde_json::from_str(&fs::read_to_string(&out)?).context("reading the profile")
@@ -2184,6 +2201,61 @@ sys.exit(1 if fails else 0)
                 .iter()
                 .any(|b| b.as_str().unwrap_or("").contains("decorated method")),
             "expected decorated method blocker, got: {info}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn timed_profile_stops_long_running_python_script() {
+        let Some(python) = ["python3", "python"].into_iter().find(|p| {
+            Command::new(p)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        }) else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("fnr-py-dur-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("server.py"),
+            r#"import time
+
+def spin(n: int) -> int:
+    total = 0
+    for i in range(n):
+        total += (i * 3) % 7
+    return total
+
+if __name__ == '__main__':
+    for _ in range(1500):
+        spin(5000)
+        time.sleep(0.02)
+"#,
+        )
+        .unwrap();
+        let ctx = Ctx::open(&dir).unwrap();
+        let start = std::time::Instant::now();
+        let prof = profile_with_options(
+            &ctx,
+            python,
+            &["server.py".to_string()],
+            crate::backend::ProfileOptions {
+                duration_secs: Some(1),
+            },
+        )
+        .unwrap();
+        assert!(
+            start.elapsed().as_secs_f64() < 10.0,
+            "timed python profile should stop early, elapsed={:?}",
+            start.elapsed()
+        );
+        assert!(
+            prof.functions.iter().any(|f| f.name == "spin"),
+            "expected `spin` in timed profile, got: {:?}",
+            prof.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
         let _ = fs::remove_dir_all(&dir);
     }

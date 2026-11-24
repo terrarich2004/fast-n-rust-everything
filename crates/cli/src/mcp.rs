@@ -628,6 +628,7 @@ pub fn compact_tools() -> Value {
                 "root": root_p,
                 "command": str_arr,
                 "cdb": { "type": "string", "description": "C/C++ compile_commands.json path for `scan`" },
+                "duration": { "type": "integer", "description": "Stop `scan` profiling after N seconds (for servers/long-running apps on Python, Node, or Bun)." },
                 "whole_app": { "type": "boolean" },
                 "lang": { "type": "string" },
                 "all": { "type": "boolean", "description": "For `doctor`: check all 14 languages instead of scoping to the project." }
@@ -780,7 +781,12 @@ pub fn tools() -> Value {
         tool(
             "scan",
             "Profile an app and rank portable hotspots with Mode Advisor (fast vs batch vs whole-app).",
-            json!({ "root": root_p, "command": cmd_p, "cdb": { "type": "string", "description": "C/C++ compile_commands.json path." } }),
+            json!({
+                "root": root_p,
+                "command": cmd_p,
+                "cdb": { "type": "string", "description": "C/C++ compile_commands.json path." },
+                "duration": { "type": "integer", "description": "Stop profiling after N seconds (for servers/long-running apps on Python, Node, or Bun)." }
+            }),
             json!([]),
             false,
             false,
@@ -1214,7 +1220,12 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
             } else {
                 strings("command")
             };
-            let out = fnr_fast::pipeline::scan(&root, command)?;
+            let duration_secs = args["duration"].as_u64();
+            let out = fnr_fast::pipeline::scan_with_options(
+                &root,
+                command,
+                fnr_fast::pipeline::ScanOptions { duration_secs },
+            )?;
             let advice = synergy::advise_mode(&out);
             json!({ "scan": out, "advice": advice })
         }
