@@ -15,10 +15,10 @@ pub fn argv(spec: &str) -> Vec<String> {
             "--permission-mode",
             "acceptEdits",
             "--allowedTools",
-            "Read Edit Write Glob Grep Bash(cargo check:*) Bash(cargo build:*) Bash(cargo test:*) Bash(cargo fmt:*)",
+            "Read Edit Write Glob Grep Bash(cargo check:*) Bash(cargo build:*) Bash(cargo test:*) Bash(cargo clippy:*) Bash(cargo fmt:*)",
         ],
         "codex" => &["codex", "exec", "--full-auto", "-"],
-        "gemini" => &["gemini", "-p", "-"],
+        "gemini" => &["gemini", "--yolo", "-p", "-"],
         "opencode" => &["opencode", "run"],
         "aider" => &["aider", "--yes-always", "--message-file", "-"],
         _ => &[],
@@ -80,7 +80,7 @@ mod tests {
     fn presets_and_custom() {
         assert_eq!(super::argv("claude")[0], "claude");
         assert_eq!(super::argv("codex"), ["codex", "exec", "--full-auto", "-"]);
-        assert_eq!(super::argv("gemini"), ["gemini", "-p", "-"]);
+        assert_eq!(super::argv("gemini"), ["gemini", "--yolo", "-p", "-"]);
         assert_eq!(super::argv("opencode"), ["opencode", "run"]);
         assert_eq!(super::argv("aider --yes"), ["aider", "--yes"]);
     }

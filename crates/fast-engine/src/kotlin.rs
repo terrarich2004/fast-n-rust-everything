@@ -958,8 +958,10 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
     let package = package_of(&text);
     let dir = java_dir(&file, &package)?;
     let class = bridge_class(port);
-    let (_, lib) = port.lang.artifact(&port.ext);
-    let lib = util::forward_slashes(&ctx.lib_dir().join(lib));
+    let (_, lib_name) = port.lang.artifact(&port.ext);
+    let from = file.parent().context("source file has no folder")?;
+    let lib_rel = util::forward_slashes(&util::relative(from, &ctx.lib_dir().join(&lib_name)));
+    let lib_root_rel = format!(".fast/lib/{lib_name}");
     let package_line = if package.is_empty() {
         String::new()
     } else {
@@ -973,7 +975,9 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
         .replace("/*IMPORTS*/", "")
         .replace("/*CLASS*/", &class)
         .replace("/*RET*/", &java_ret)
-        .replace("/*LIB*/", &serde_json::to_string(&lib)?)
+        .replace("/*LIB*/", &serde_json::to_string(&lib_root_rel)?)
+        .replace("/*LIB_REL*/", &serde_json::to_string(&lib_rel)?)
+        .replace("/*LIB_NAME*/", &serde_json::to_string(&lib_name)?)
         .replace("/*ID*/", &port.id)
         .replace("/*DIRECT_FIELDS*/", &d_fields)
         .replace("/*DIRECT_INIT*/", &d_init)

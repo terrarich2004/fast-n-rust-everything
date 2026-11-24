@@ -364,6 +364,7 @@ pub fn fuzz_cases(
 pub fn shim(port: &Port, lib_rel: &str) -> String {
     let owner = owner(port.owner.as_deref());
     let name = &port.func;
+    let lib_name = lib_rel.rsplit('/').next().unwrap_or(lib_rel);
     let mut lines = vec![
         "# Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the Ruby above instead.".to_string(),
         format!("# Undo with:  fnr disable {}", port.id),
@@ -371,7 +372,7 @@ pub fn shim(port: &Port, lib_rel: &str) -> String {
         "  begin".to_string(),
         "    require \"fiddle\"".to_string(),
         "    require \"json\"".to_string(),
-        format!("    -> {{\n      lib = Fiddle.dlopen(File.expand_path(\"{lib_rel}\", __dir__))"),
+        format!("    -> {{\n      _lib_path = (ENV[\"FNR_LIB_DIR\"] && !ENV[\"FNR_LIB_DIR\"].empty?) ? File.join(ENV[\"FNR_LIB_DIR\"], \"{lib_name}\") : File.expand_path(\"{lib_rel}\", __dir__)\n      lib = Fiddle.dlopen(_lib_path)"),
         "      call = Fiddle::Function.new(lib[\"fa_call\"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP)".to_string(),
         "      bin = (Fiddle::Function.new(lib[\"fa_bin\"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T, Fiddle::TYPE_VOIDP], Fiddle::TYPE_VOIDP) rescue nil)".to_string(),
         "      free = Fiddle::Function.new(lib[\"fa_free\"], [Fiddle::TYPE_VOIDP, Fiddle::TYPE_SIZE_T], Fiddle::TYPE_VOID)".to_string(),
@@ -406,7 +407,8 @@ pub fn shim(port: &Port, lib_rel: &str) -> String {
     }
     lines.extend([
         "    }.call".to_string(),
-        "  rescue LoadError, Fiddle::DLError".to_string(),
+        "  rescue LoadError, Fiddle::DLError => _err".to_string(),
+        format!("    raise LoadError, \"fnr: FNR_STRICT=1 and Rust port {} ({lib_name}) could not be loaded: #{{_err}}\" if %w[1 true].include?(ENV[\"FNR_STRICT\"].to_s.downcase)", port.id),
         "  end".to_string(),
         "end".to_string(),
     ]);

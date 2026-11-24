@@ -700,21 +700,23 @@ pub fn fuzz_cases(
 
 /// R has no reliable "this file's folder": the shim looks for the port next to the file it was
 /// sourced from (or the Rscript script), then where the project was when it was enabled.
-pub fn shim(port: &Port, lib_rel: &str, lib_abs: &str) -> String {
+pub fn shim(port: &Port, lib_rel: &str, lib_root_rel: &str) -> String {
     let f = &port.func;
+    let lib_name = lib_rel.rsplit('/').next().unwrap_or(lib_rel);
     [
         "# Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the R above instead.".to_string(),
         format!("# Undo with:  fnr disable {}", port.id),
         format!("if (!nzchar(Sys.getenv(\"FNR_DISABLE\")) && !nzchar(Sys.getenv(\"FAST_ANYTHING_DISABLE\"))) {f} <- local({{"),
         "  from <- c(tryCatch(dirname(normalizePath(sys.frame(1)$ofile)), error = function(e) NULL),".to_string(),
         "            tryCatch(dirname(normalizePath(sub(\"^--file=\", \"\", grep(\"^--file=\", commandArgs(FALSE), value = TRUE)[1]))), error = function(e) NULL))".to_string(),
-        format!("  libs <- c(file.path(from, {}), {})", r_string(lib_rel), r_string(lib_abs)),
+        "  env_dir <- Sys.getenv(\"FNR_LIB_DIR\")".to_string(),
+        format!("  libs <- c(if (nzchar(env_dir)) file.path(env_dir, {}) else character(0), file.path(from, {}), {})", r_string(lib_name), r_string(lib_rel), r_string(lib_root_rel)),
         "  lib <- libs[file.exists(libs)][1]".to_string(),
-        format!("  if (is.na(lib)) {f} else tryCatch({{"),
+        format!("  if (is.na(lib)) {{ if (tolower(Sys.getenv(\"FNR_STRICT\")) %in% c(\"1\", \"true\")) stop(\"fnr: FNR_STRICT=1 and Rust port {} could not be loaded\"); {f} }} else tryCatch({{", port.id),
         "    fa <- new.env()".to_string(),
         "    sys.source(file.path(dirname(lib), \"fast_anything.R\"), envir = fa)".to_string(),
         format!("    fa$.fa_port(lib, {f})"),
-        format!("  }}, error = function(e) {f})"),
+        format!("  }}, error = function(e) {{ if (tolower(Sys.getenv(\"FNR_STRICT\")) %in% c(\"1\", \"true\")) stop(e); {f} }})"),
         "})".to_string(),
     ]
     .join("\n")
@@ -725,11 +727,11 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
     let from = file.parent().context("file has no folder")?;
     let (_, lib) = backend::Lang::R.artifact(&port.ext);
-    let lib_path = ctx.lib_dir().join(lib);
+    let lib_path = ctx.lib_dir().join(&lib);
     fs::write(ctx.lib_dir().join("fast_anything.R"), BRIDGE)?;
     let rel = forward_slashes(&relative(from, &lib_path));
-    let abs = forward_slashes(&lib_path);
-    let block = shim(port, &rel, &abs);
+    let root_rel = format!(".fast/lib/{lib}");
+    let block = shim(port, &rel, &root_rel);
     let patched = if port.module == "__main__" {
         backend::insert_marked(&text, "#", &port.id, &block, main_guard)
     } else {

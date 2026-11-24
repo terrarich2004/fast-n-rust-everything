@@ -773,13 +773,17 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
     let file = ctx.root.join(&port.file);
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
     let class = bridge_class(port);
-    let (_, lib) = port.lang.artifact(&port.ext);
-    let lib = util::forward_slashes(&ctx.lib_dir().join(lib));
+    let (_, lib_name) = port.lang.artifact(&port.ext);
+    let from = file.parent().context("source file has no folder")?;
+    let lib_rel = util::forward_slashes(&util::relative(from, &ctx.lib_dir().join(&lib_name)));
+    let lib_root_rel = format!(".fast/lib/{lib_name}");
     let ret_cs = ret(hs);
     let (d_decl, d_load, d_methods, d_args) = csharp_direct_parts(hs, &ret_cs);
     let bridge = BRIDGE
         .replace("/*CLASS*/", &class)
-        .replace("/*LIB*/", &serde_json::to_string(&lib)?)
+        .replace("/*LIB*/", &serde_json::to_string(&lib_root_rel)?)
+        .replace("/*LIB_REL*/", &serde_json::to_string(&lib_rel)?)
+        .replace("/*LIB_NAME*/", &serde_json::to_string(&lib_name)?)
         .replace("/*ID*/", &port.id)
         .replace("/*DIRECT_DECL*/", &d_decl)
         .replace("/*DIRECT_LOAD*/", &d_load)

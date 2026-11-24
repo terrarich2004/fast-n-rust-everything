@@ -190,8 +190,8 @@ func describe(fset *token.FileSet, src []byte, path, pkg, pkgName string, fd *as
 		if !supported(t) {
 			fn.Blockers = append(fn.Blockers, "returns a "+t)
 		}
-		if len(results.List[0].Names) > 0 {
-			fn.Blockers = append(fn.Blockers, "has named results")
+		for _, n := range results.List[0].Names {
+			locals[n.Name] = true
 		}
 	}
 	io, nondet, helpers := []string{}, []string{}, []string{}

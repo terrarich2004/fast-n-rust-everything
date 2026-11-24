@@ -507,14 +507,16 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
     }
     let class = bridge_class(port);
     let from = file.parent().context("file has no folder")?;
-    let (_, lib) = port.lang.artifact(&port.ext);
-    let lib_rel = util::forward_slashes(&util::relative(from, &ctx.lib_dir().join(lib)));
+    let (_, lib_name) = port.lang.artifact(&port.ext);
+    let lib_rel = util::forward_slashes(&util::relative(from, &ctx.lib_dir().join(&lib_name)));
     let lib_lit = format!("'{}'", lib_rel.replace('\\', "\\\\").replace('\'', "\\'"));
+    let lib_name_lit = format!("'{}'", lib_name.replace('\\', "\\\\").replace('\'', "\\'"));
     let (d_load, d_method, d_call) = php_direct_parts(hs, &class);
     let bridge = BRIDGE
         .replace("/*CLASS*/", &class)
         .replace("/*ID*/", &port.id)
         .replace("/*LIB*/", &lib_lit)
+        .replace("/*LIB_NAME*/", &lib_name_lit)
         .replace("/*DIRECT_LOAD*/", &d_load)
         .replace("/*DIRECT_METHOD*/", &d_method);
     let json_fallback = format!(

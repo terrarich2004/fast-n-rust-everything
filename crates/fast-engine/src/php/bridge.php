@@ -12,10 +12,17 @@ final class /*CLASS*/
     {
         self::$on = false;
         if (getenv('FNR_DISABLE') !== false || getenv('FAST_ANYTHING_DISABLE') !== false || !extension_loaded('ffi')) return false;
-        $lib = __DIR__ . '/' . /*LIB*/;
+        $envDir = getenv('FNR_LIB_DIR');
+        $lib = ($envDir !== false && $envDir !== '')
+            ? rtrim($envDir, "/\\") . '/' . /*LIB_NAME*/
+            : __DIR__ . '/' . /*LIB*/;
         try {
             self::$ffi = \FFI::cdef('uint8_t *fa_call(const char *input, size_t len, size_t *out_len); void fa_free(uint8_t *ptr, size_t len);', $lib);
         } catch (\Throwable $e) {
+            $strict = getenv('FNR_STRICT');
+            if ($strict === '1' || ($strict !== false && strtolower($strict) === 'true')) {
+                throw new \RuntimeException('fnr: FNR_STRICT=1 and Rust port /*ID*/ could not be loaded: ' . $e->getMessage(), 0, $e);
+            }
             return false;
         }
         try {

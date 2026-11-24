@@ -17,7 +17,23 @@ final class /*CLASS*/ {
             try {
                 t = /*CLASS*/.class.getDeclaredField("type").getGenericType();
                 var linker = java.lang.foreign.Linker.nativeLinker();
-                var lib = java.lang.foreign.SymbolLookup.libraryLookup(java.nio.file.Path.of(/*LIB*/), java.lang.foreign.Arena.global());
+                String envDir = System.getenv("FNR_LIB_DIR");
+                java.nio.file.Path libPath = null;
+                if (envDir != null && !envDir.isEmpty()) {
+                    libPath = java.nio.file.Path.of(envDir, /*LIB_NAME*/);
+                } else {
+                    for (String cand : new String[] { /*LIB*/, /*LIB_REL*/ }) {
+                        java.nio.file.Path p = java.nio.file.Path.of(cand);
+                        if (java.nio.file.Files.exists(p)) {
+                            libPath = p;
+                            break;
+                        }
+                    }
+                    if (libPath == null) {
+                        libPath = java.nio.file.Path.of(/*LIB*/);
+                    }
+                }
+                var lib = java.lang.foreign.SymbolLookup.libraryLookup(libPath, java.lang.foreign.Arena.global());
                 c = linker.downcallHandle(lib.find("fa_call").orElseThrow(), java.lang.foreign.FunctionDescriptor.of(
                     java.lang.foreign.ValueLayout.ADDRESS, java.lang.foreign.ValueLayout.ADDRESS, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
                 var bSym = lib.find("fa_bin");
@@ -31,6 +47,10 @@ final class /*CLASS*/ {
             } catch (Throwable e) {
                 c = null;
                 b = null;
+                String strict = System.getenv("FNR_STRICT");
+                if ("1".equals(strict) || "true".equalsIgnoreCase(strict)) {
+                    throw new ExceptionInInitializerError("fnr: FNR_STRICT=1 and Rust port /*ID*/ (" + /*LIB_NAME*/ + ") could not be loaded: " + e);
+                }
             }
         }
         TYPE = t;

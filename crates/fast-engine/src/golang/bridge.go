@@ -9,6 +9,7 @@ import (
 	"errors"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -24,7 +25,26 @@ var (
 
 func faFast_/*S*/(/*PARAMS*/) (/*RET*/, bool) {
 	var zero /*RET*/
-	faOnce_/*S*/.Do(func() { faOn_/*S*/ = os.Getenv("FNR_DISABLE") == "" && os.Getenv("FAST_ANYTHING_DISABLE") == "" && faLoad_/*S*/(/*LIB*/) })
+	faOnce_/*S*/.Do(func() {
+		if os.Getenv("FNR_DISABLE") != "" || os.Getenv("FAST_ANYTHING_DISABLE") != "" {
+			return
+		}
+		if dir := os.Getenv("FNR_LIB_DIR"); dir != "" {
+			faOn_/*S*/ = faLoad_/*S*/(filepath.Join(dir, /*LIB_NAME*/))
+		} else {
+			for _, cand := range []string{/*LIB*/, /*LIB_REL*/} {
+				if faLoad_/*S*/(cand) {
+					faOn_/*S*/ = true
+					break
+				}
+			}
+		}
+		if !faOn_/*S*/ {
+			if s := os.Getenv("FNR_STRICT"); s == "1" || strings.EqualFold(s, "true") {
+				panic("fnr: FNR_STRICT=1 and Rust port /*ID*/ (" + /*LIB_NAME*/ + ") could not be loaded")
+			}
+		}
+	})
 	if !faOn_/*S*/ {
 		return zero, false
 	}

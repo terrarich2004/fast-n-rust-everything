@@ -598,8 +598,12 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
         );
     }
     let s = suffix(port);
-    let (_, lib) = port.lang.artifact(&port.ext);
-    let lib = serde_json::to_string(&util::forward_slashes(&ctx.lib_dir().join(lib)))?;
+    let (_, lib_name) = port.lang.artifact(&port.ext);
+    let from = file.parent().context("source file has no folder")?;
+    let lib_rel = util::forward_slashes(&util::relative(from, &ctx.lib_dir().join(&lib_name)));
+    let lib_root_rel = serde_json::to_string(&format!(".fast/lib/{lib_name}"))?;
+    let lib_rel_lit = serde_json::to_string(&lib_rel)?;
+    let lib_name_lit = serde_json::to_string(&lib_name)?;
     let params: Vec<String> = hs
         .params
         .iter()
@@ -617,7 +621,9 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
         .replace("/*PARAMS*/", &params.join(", "))
         .replace("/*ARGS*/", &arg_list(hs))
         .replace("/*RET*/", &ret(hs))
-        .replace("/*LIB*/", &lib)
+        .replace("/*LIB*/", &lib_root_rel)
+        .replace("/*LIB_REL*/", &lib_rel_lit)
+        .replace("/*LIB_NAME*/", &lib_name_lit)
         .replace("/*DIRECT_C*/", &direct_c)
         .replace(
             "/*DIRECT_ENABLED*/",

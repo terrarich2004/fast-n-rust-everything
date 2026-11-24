@@ -11,6 +11,10 @@ description = "Hotspot profiling, recording, verification, and inline swap engin
 name = "fnr_fast"
 path = "src/lib.rs"
 
+[features]
+default = []
+legacy-standalone = []
+
 [dependencies]
 anyhow = "1.0.104"
 libloading = "0.9.1"

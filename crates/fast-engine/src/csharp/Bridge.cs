@@ -36,7 +36,28 @@ static class /*CLASS*/
         if (Environment.GetEnvironmentVariable("FNR_DISABLE") != null || Environment.GetEnvironmentVariable("FAST_ANYTHING_DISABLE") != null) return;
         try
         {
-            var lib = NativeLibrary.Load(/*LIB*/);
+            var envDir = Environment.GetEnvironmentVariable("FNR_LIB_DIR");
+            string? libPath = !string.IsNullOrEmpty(envDir)
+                ? Path.Combine(envDir, /*LIB_NAME*/)
+                : null;
+            if (libPath == null)
+            {
+                foreach (var cand in new[]
+                {
+                    Path.GetFullPath(/*LIB*/),
+                    Path.GetFullPath(/*LIB_REL*/),
+                    Path.Combine(AppContext.BaseDirectory, ".fast", "lib", /*LIB_NAME*/),
+                })
+                {
+                    if (File.Exists(cand))
+                    {
+                        libPath = cand;
+                        break;
+                    }
+                }
+                libPath ??= Path.GetFullPath(/*LIB*/);
+            }
+            var lib = NativeLibrary.Load(libPath);
             CallFn = Marshal.GetDelegateForFunctionPointer<FaCall>(NativeLibrary.GetExport(lib, "fa_call"));
             FreeFn = Marshal.GetDelegateForFunctionPointer<FaFree>(NativeLibrary.GetExport(lib, "fa_free"));
             if (NativeLibrary.TryGetExport(lib, "fa_bin", out var binPtr))
@@ -47,10 +68,15 @@ static class /*CLASS*/
 /*DIRECT_LOAD*/
             On = true;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             On = false;
             BinOn = false;
+            var strict = Environment.GetEnvironmentVariable("FNR_STRICT");
+            if (strict == "1" || string.Equals(strict, "true", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("fnr: FNR_STRICT=1 and Rust port /*ID*/ (" + /*LIB_NAME*/ + ") could not be loaded", ex);
+            }
         }
     }
 

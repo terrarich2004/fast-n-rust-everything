@@ -6,6 +6,7 @@ pub mod backend;
 pub mod bench;
 pub mod cfamily;
 pub mod csharp;
+#[cfg(feature = "legacy-standalone")]
 pub mod doctor;
 pub mod golang;
 pub mod hotspot;

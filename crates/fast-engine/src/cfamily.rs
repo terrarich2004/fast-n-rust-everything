@@ -1576,17 +1576,104 @@ fn param_list(hs: &Hotspot) -> String {
         .join(", ")
 }
 
-const LOADER: &str = "#ifdef _WIN32\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#define FA_OPEN(p) ((void *) LoadLibraryA(p))\n#define FA_SYM(l, n) ((void *) GetProcAddress((HMODULE) (l), n))\n#else\n#include <dlfcn.h>\n#ifdef RTLD_NODELETE\n#define FA_RTLD_NODELETE RTLD_NODELETE\n#else\n#define FA_RTLD_NODELETE 0\n#endif\n#define FA_OPEN(p) dlopen(p, RTLD_NOW | RTLD_LOCAL | FA_RTLD_NODELETE)\n#define FA_SYM(l, n) dlsym(l, n)\n#endif";
+const LOADER: &str = "#ifdef _WIN32\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#define FA_OPEN(p) ((void *) LoadLibraryA(p))\n#define FA_SYM(l, n) ((void *) GetProcAddress((HMODULE) (l), n))\n#define FA_STATE_T volatile LONG\n#define FA_LOAD_ACQ(p) InterlockedCompareExchange((volatile LONG *)(p), 0, 0)\n#define FA_CAS(p, expected, desired) (InterlockedCompareExchange((volatile LONG *)(p), (desired), (expected)) == (expected))\n#define FA_STORE_REL(p, v) InterlockedExchange((volatile LONG *)(p), (v))\n#define FA_YIELD() SwitchToThread()\n#else\n#include <dlfcn.h>\n#ifdef RTLD_NODELETE\n#define FA_RTLD_NODELETE RTLD_NODELETE\n#else\n#define FA_RTLD_NODELETE 0\n#endif\n#define FA_OPEN(p) dlopen(p, RTLD_NOW | RTLD_LOCAL | FA_RTLD_NODELETE)\n#define FA_SYM(l, n) dlsym(l, n)\n#define FA_STATE_T volatile int\n#define FA_LOAD_ACQ(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)\n#define FA_CAS(p, expected, desired) __sync_bool_compare_and_swap((p), (expected), (desired))\n#define FA_STORE_REL(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)\n#define FA_YIELD() ((void)0)\n#endif";
 
-fn c_bridge(hs: &Hotspot, s: &str, lib: &str) -> Result<String> {
+fn lib_open_fn_c(s: &str, lib_name: &str, file_rel: &str) -> String {
+    let name_lit = c_string_literal(lib_name);
+    let root_rel = c_string_literal(&format!(".fast/lib/{lib_name}"));
+    let file_rel_lit = c_string_literal(file_rel);
+    let parent_rel = c_string_literal(&format!("../.fast/lib/{lib_name}"));
+    format!(
+        r#"static void *fa_open_{s}(void) {{
+    const char *dir = getenv("FNR_LIB_DIR");
+    if (dir && dir[0]) {{
+        const char *name = {name_lit};
+        size_t dlen = strlen(dir), nlen = strlen(name);
+        if (dlen + 1 + nlen < 4096) {{
+            char buf[4096];
+            memcpy(buf, dir, dlen);
+            buf[dlen] = '/';
+            memcpy(buf + dlen + 1, name, nlen + 1);
+            void *h = FA_OPEN(buf);
+            if (h) return h;
+        }}
+    }}
+    {{
+        const char *cands[] = {{ {root_rel}, {file_rel_lit}, {parent_rel} }};
+        size_t i;
+        for (i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {{
+            void *h = FA_OPEN(cands[i]);
+            if (h) return h;
+        }}
+    }}
+    return NULL;
+}}"#
+    )
+}
+
+fn lib_open_fn_cpp(lib_name: &str, file_rel: &str) -> String {
+    let name_lit = c_string_literal(lib_name);
+    let root_rel = c_string_literal(&format!(".fast/lib/{lib_name}"));
+    let file_rel_lit = c_string_literal(file_rel);
+    let parent_rel = c_string_literal(&format!("../.fast/lib/{lib_name}"));
+    format!(
+        r#"static void *open_lib() {{
+    const char *dir = std::getenv("FNR_LIB_DIR");
+    if (dir && dir[0]) {{
+        const char *name = {name_lit};
+        std::size_t dlen = std::strlen(dir), nlen = std::strlen(name);
+        if (dlen + 1 + nlen < 4096) {{
+            char buf[4096];
+            std::memcpy(buf, dir, dlen);
+            buf[dlen] = '/';
+            std::memcpy(buf + dlen + 1, name, nlen + 1);
+            void *h = FA_OPEN(buf);
+            if (h) return h;
+        }}
+    }}
+    const char *cands[] = {{ {root_rel}, {file_rel_lit}, {parent_rel} }};
+    for (const char *cand : cands) {{
+        void *h = FA_OPEN(cand);
+        if (h) return h;
+    }}
+    return nullptr;
+}}"#
+    )
+}
+
+fn replace_slug_suffix(src: &str, s: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len() + s.len() * 8);
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 2 <= bytes.len()
+            && &bytes[i..i + 2] == b"_S"
+            && !bytes
+                .get(i + 2)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            out.push('_');
+            out.push_str(s);
+            i += 2;
+        } else {
+            let ch = src[i..].chars().next().expect("valid utf8");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn c_bridge(hs: &Hotspot, s: &str, lib_name: &str, file_rel: &str) -> Result<String> {
     let kinds = c_kinds(&hs.params).map_err(anyhow::Error::msg)?;
     let ret = hs.returns.clone().unwrap_or_default();
+    let lib_open = lib_open_fn_c(s, lib_name, file_rel);
+    let lib_name_lit = c_string_literal(lib_name);
     if let Some(sig) = native::DirectSig::from_hotspot(hs, &FLAVOR_C) {
         let abi_ret = sig.ret.c_ty();
         let mut ptr_params = Vec::new();
         let mut guards = String::new();
         let mut call_args = Vec::new();
-        let mut needs_string_h = false;
         let mut can_direct = true;
         for (i, (dp, ck)) in sig.params.iter().zip(kinds.iter()).enumerate() {
             let n = &hs.params[i].name;
@@ -1600,7 +1687,6 @@ fn c_bridge(hs: &Hotspot, s: &str, lib: &str) -> Result<String> {
                     }
                 }
                 (native::DirectParam::Str { .. }, _) => {
-                    needs_string_h = true;
                     ptr_params.push("const uint8_t *".to_string());
                     ptr_params.push("size_t".to_string());
                     guards.push_str(&format!("    if (!({n})) return 0;\n"));
@@ -1626,11 +1712,6 @@ fn c_bridge(hs: &Hotspot, s: &str, lib: &str) -> Result<String> {
         if can_direct {
             ptr_params.push("int32_t *".to_string());
             call_args.push("&fa_d_ok".to_string());
-            let inc_str = if needs_string_h {
-                "#include <string.h>\n"
-            } else {
-                ""
-            };
             let cast_ret = if sig.ret == native::CAbiScalar::Bool {
                 format!("({ret}) (fa_res != 0)")
             } else {
@@ -1640,20 +1721,40 @@ fn c_bridge(hs: &Hotspot, s: &str, lib: &str) -> Result<String> {
                 r#"/* Calls the verified Rust port of {id} via direct binary C ABI. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the C version instead. */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
-{inc_str}{loader}
+#include <string.h>
+{loader}
+{lib_open}
 static {abi_ret} (*fa_direct_S)({ptr_params});
 int fa_on_S(void) {{
-    static int state = -1;
-    if (state < 0) {{
-        void *lib = (getenv("FNR_DISABLE") || getenv("FAST_ANYTHING_DISABLE")) ? NULL : FA_OPEN({lib});
-        state = 0;
-        if (lib) {{
-            *(void **) &fa_direct_S = FA_SYM(lib, "fa_direct");
-            state = fa_direct_S != NULL;
+    static FA_STATE_T state = 0;
+    int s = (int) FA_LOAD_ACQ(&state);
+    if (s == 3) return 1;
+    if (s == 2) return 0;
+    if (FA_CAS(&state, 0, 1)) {{
+        int next = 2;
+        if (!(getenv("FNR_DISABLE") || getenv("FAST_ANYTHING_DISABLE"))) {{
+            void *lib = fa_open_S();
+            if (lib) {{
+                *(void **) &fa_direct_S = FA_SYM(lib, "fa_direct");
+                if (fa_direct_S != NULL) next = 3;
+            }}
+            if (next != 3) {{
+                const char *strict = getenv("FNR_STRICT");
+                if (strict && (strcmp(strict, "1") == 0 || strcmp(strict, "true") == 0)) {{
+                    fprintf(stderr, "fnr: FNR_STRICT=1 and Rust port %s (%s) could not be loaded\n", "{id}", {lib_name_lit});
+                    abort();
+                }}
+            }}
         }}
+        FA_STORE_REL(&state, next);
+        return next == 3;
     }}
-    return state;
+    while ((s = (int) FA_LOAD_ACQ(&state)) == 1) {{
+        FA_YIELD();
+    }}
+    return s == 3;
 }}
 /* Sets *fa_ok to 0 (and the C version runs) if the port can't answer. */
 {ret} fa_fast_S(int *fa_ok, {params}) {{
@@ -1673,7 +1774,7 @@ int fa_on_S(void) {{
                 params = param_list(hs),
                 call_args = call_args.join(", "),
             );
-            return Ok(body.replace("_S", &format!("_{s}")));
+            return Ok(replace_slug_suffix(&body, s));
         }
     }
 
@@ -1719,21 +1820,39 @@ int fa_on_S(void) {{
 #include <stdlib.h>
 #include <string.h>
 {loader}
+{lib_open}
 typedef struct {{ char *p; size_t len, cap; }} fa_buf_S;
 static unsigned char *(*fa_call_S)(const unsigned char *, size_t, size_t *);
 static void (*fa_free_S)(unsigned char *, size_t);
 int fa_on_S(void) {{
-    static int state = -1;
-    if (state < 0) {{
-        void *lib = (getenv("FNR_DISABLE") || getenv("FAST_ANYTHING_DISABLE")) ? NULL : FA_OPEN({lib});
-        state = 0;
-        if (lib) {{
-            *(void **) &fa_call_S = FA_SYM(lib, "fa_call");
-            *(void **) &fa_free_S = FA_SYM(lib, "fa_free");
-            state = fa_call_S && fa_free_S;
+    static FA_STATE_T state = 0;
+    int s = (int) FA_LOAD_ACQ(&state);
+    if (s == 3) return 1;
+    if (s == 2) return 0;
+    if (FA_CAS(&state, 0, 1)) {{
+        int next = 2;
+        if (!(getenv("FNR_DISABLE") || getenv("FAST_ANYTHING_DISABLE"))) {{
+            void *lib = fa_open_S();
+            if (lib) {{
+                *(void **) &fa_call_S = FA_SYM(lib, "fa_call");
+                *(void **) &fa_free_S = FA_SYM(lib, "fa_free");
+                if (fa_call_S && fa_free_S) next = 3;
+            }}
+            if (next != 3) {{
+                const char *strict = getenv("FNR_STRICT");
+                if (strict && (strcmp(strict, "1") == 0 || strcmp(strict, "true") == 0)) {{
+                    fprintf(stderr, "fnr: FNR_STRICT=1 and Rust port %s (%s) could not be loaded\n", "{id}", {lib_name_lit});
+                    abort();
+                }}
+            }}
         }}
+        FA_STORE_REL(&state, next);
+        return next == 3;
     }}
-    return state;
+    while ((s = (int) FA_LOAD_ACQ(&state)) == 1) {{
+        FA_YIELD();
+    }}
+    return s == 3;
 }}
 static void fa_put_S(fa_buf_S *b, const char *s) {{
     size_t n = strlen(s);
@@ -1795,11 +1914,19 @@ fallback:
         loader = LOADER,
         params = param_list(hs),
     );
-    Ok(body.replace("_S", &format!("_{s}")))
+    Ok(replace_slug_suffix(&body, s))
 }
 
-fn cpp_bridge(hs: &Hotspot, s: &str, lib: &str, namespaces: &[String]) -> String {
+fn cpp_bridge(
+    hs: &Hotspot,
+    s: &str,
+    lib_name: &str,
+    file_rel: &str,
+    namespaces: &[String],
+) -> String {
     let ret = hs.returns.clone().unwrap_or_default();
+    let lib_open = lib_open_fn_cpp(lib_name, file_rel);
+    let lib_name_lit = c_string_literal(lib_name);
     let open: String = namespaces
         .iter()
         .map(|n| {
@@ -1867,21 +1994,31 @@ fn cpp_bridge(hs: &Hotspot, s: &str, lib: &str, namespaces: &[String]) -> String
             r#"// Calls the verified Rust port of {id} via direct binary C ABI. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the C++ version instead.
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 {loader}
 namespace fa_bridge_S {{
+{lib_open}
 struct Lib {{
     {abi_ret} (*direct)({ptr_params}) = nullptr;
     bool on = false;
     Lib() {{
         if (std::getenv("FNR_DISABLE") || std::getenv("FAST_ANYTHING_DISABLE")) return;
-        void *lib = FA_OPEN({lib});
-        if (!lib) return;
-        *(void **) &direct = FA_SYM(lib, "fa_direct");
-        on = direct != nullptr;
+        void *lib = open_lib();
+        if (lib) {{
+            *(void **) &direct = FA_SYM(lib, "fa_direct");
+            on = direct != nullptr;
+        }}
+        if (!on) {{
+            const char *strict = std::getenv("FNR_STRICT");
+            if (strict && (std::strcmp(strict, "1") == 0 || std::strcmp(strict, "true") == 0)) {{
+                std::fprintf(stderr, "fnr: FNR_STRICT=1 and Rust port %s (%s) could not be loaded\n", "{id}", {lib_name_lit});
+                std::abort();
+            }}
+        }}
     }}
 }};
 inline Lib &lib() {{ static Lib l; return l; }}
@@ -1901,7 +2038,7 @@ bool fa_fast_S({ret} &fa_out, {params}) {{
             params = param_list(hs),
             call_args = call_args.join(", "),
         );
-        return body.replace("_S", &format!("_{s}"));
+        return replace_slug_suffix(&body, s);
     }
     if native::BinSig::from_hotspot(hs, &FLAVOR_CPP) {
         let body = format!(
@@ -1910,6 +2047,7 @@ bool fa_fast_S({ret} &fa_out, {params}) {{
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -1921,6 +2059,7 @@ bool fa_fast_S({ret} &fa_out, {params}) {{
 #include <vector>
 {loader}
 namespace fa_bridge_S {{
+{lib_open}
 {bin_hpp}
 struct Lib {{
     unsigned char *(*bin)(const unsigned char *, size_t, size_t *) = nullptr;
@@ -1928,11 +2067,19 @@ struct Lib {{
     bool on = false;
     Lib() {{
         if (std::getenv("FNR_DISABLE") || std::getenv("FAST_ANYTHING_DISABLE")) return;
-        void *lib = FA_OPEN({lib});
-        if (!lib) return;
-        *(void **) &bin = FA_SYM(lib, "fa_bin");
-        *(void **) &free = FA_SYM(lib, "fa_free");
-        on = bin && free;
+        void *lib = open_lib();
+        if (lib) {{
+            *(void **) &bin = FA_SYM(lib, "fa_bin");
+            *(void **) &free = FA_SYM(lib, "fa_free");
+            on = bin && free;
+        }}
+        if (!on) {{
+            const char *strict = std::getenv("FNR_STRICT");
+            if (strict && (std::strcmp(strict, "1") == 0 || std::strcmp(strict, "true") == 0)) {{
+                std::fprintf(stderr, "fnr: FNR_STRICT=1 and Rust port %s (%s) could not be loaded\n", "{id}", {lib_name_lit});
+                std::abort();
+            }}
+        }}
     }}
 }};
 inline Lib &lib() {{ static Lib l; return l; }}
@@ -1970,7 +2117,7 @@ bool fa_fast_S({ret} &fa_out, {params}) {{
             params = param_list(hs),
             args = arg_names(hs).join(", "),
         );
-        return body.replace("_S", &format!("_{s}"));
+        return replace_slug_suffix(&body, s);
     }
     let body = format!(
         r#"// Calls the verified Rust port of {id}. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the C++ version instead.
@@ -1989,6 +2136,7 @@ bool fa_fast_S({ret} &fa_out, {params}) {{
 #include <vector>
 {loader}
 namespace fa_bridge_S {{
+{lib_open}
 {json}
 struct Lib {{
     unsigned char *(*call)(const unsigned char *, size_t, size_t *) = nullptr;
@@ -1996,11 +2144,19 @@ struct Lib {{
     bool on = false;
     Lib() {{
         if (std::getenv("FNR_DISABLE") || std::getenv("FAST_ANYTHING_DISABLE")) return;
-        void *lib = FA_OPEN({lib});
-        if (!lib) return;
-        *(void **) &call = FA_SYM(lib, "fa_call");
-        *(void **) &free = FA_SYM(lib, "fa_free");
-        on = call && free;
+        void *lib = open_lib();
+        if (lib) {{
+            *(void **) &call = FA_SYM(lib, "fa_call");
+            *(void **) &free = FA_SYM(lib, "fa_free");
+            on = call && free;
+        }}
+        if (!on) {{
+            const char *strict = std::getenv("FNR_STRICT");
+            if (strict && (std::strcmp(strict, "1") == 0 || std::strcmp(strict, "true") == 0)) {{
+                std::fprintf(stderr, "fnr: FNR_STRICT=1 and Rust port %s (%s) could not be loaded\n", "{id}", {lib_name_lit});
+                std::abort();
+            }}
+        }}
     }}
 }};
 inline Lib &lib() {{ static Lib l; return l; }}
@@ -2029,7 +2185,7 @@ bool fa_fast_S({ret} &fa_out, {params}) {{
         params = param_list(hs),
         args = arg_names(hs).join(", "),
     );
-    body.replace("_S", &format!("_{s}"))
+    replace_slug_suffix(&body, s)
 }
 
 fn find_body(name: &str, hint: u32) -> impl Fn(&str) -> Option<usize> {
@@ -2053,8 +2209,9 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
     let cpp = port.lang == Lang::Cpp || is_cpp_file(&port.file);
     let s = suffix(port);
-    let (_, lib) = port.lang.artifact(&port.ext);
-    let lib = c_string_literal(&util::forward_slashes(&ctx.lib_dir().join(lib)));
+    let (_, lib_name) = port.lang.artifact(&port.ext);
+    let from = file.parent().context("source file has no folder")?;
+    let file_rel = util::forward_slashes(&util::relative(from, &ctx.lib_dir().join(&lib_name)));
     let ret = hs.returns.clone().unwrap_or_default();
     let args = arg_names(hs).join(", ");
     let (prologue, bridge) = if cpp {
@@ -2068,7 +2225,7 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
                 "bool fa_on_{s}();\nbool fa_fast_{s}({ret} &, {params});\nif (fa_on_{s}()) {{\n    {ret} fa_r{{}};\n    if (fa_fast_{s}(fa_r, {args})) return fa_r;\n}}",
                 params = param_list(hs)
             ),
-            cpp_bridge(hs, &s, &lib, &namespaces),
+            cpp_bridge(hs, &s, &lib_name, &file_rel, &namespaces),
         )
     } else {
         (
@@ -2076,7 +2233,7 @@ pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
                 "int fa_on_{s}(void);\n{ret} fa_fast_{s}(int *, {params});\nif (fa_on_{s}()) {{\n    int fa_ok;\n    {ret} fa_r = fa_fast_{s}(&fa_ok, {args});\n    if (fa_ok) return fa_r;\n}}",
                 params = param_list(hs)
             ),
-            c_bridge(hs, &s, &lib)?,
+            c_bridge(hs, &s, &lib_name, &file_rel)?,
         )
     };
     let patched = native::insert_in_body(
@@ -2588,9 +2745,13 @@ mod tests {
             returns: Some("long long".into()),
             ..Hotspot::default()
         };
-        let c_src = c_bridge(&hs, "mandelbrot", "\"libx.so\"").unwrap();
+        let c_src = c_bridge(&hs, "mandelbrot", "libx.so", ".fast/lib/libx.so").unwrap();
         assert!(c_src.contains("fa_direct"), "{c_src}");
         assert!(!c_src.contains("snprintf"), "{c_src}");
+        assert!(c_src.contains("getenv(\"FNR_STRICT\")"), "{c_src}");
+        assert!(c_src.contains("#define FA_STATE_T"), "{c_src}");
+        assert!(c_src.contains("FA_STORE_REL(&state"), "{c_src}");
+        assert!(!c_src.contains("FNR_mandelbrot"), "{c_src}");
 
         let cpp_hs = Hotspot {
             id: "math.cpp:dot".into(),
@@ -2616,9 +2777,11 @@ mod tests {
             returns: Some("double".into()),
             ..Hotspot::default()
         };
-        let cpp_src = cpp_bridge(&cpp_hs, "dot", "\"libx.so\"", &[]);
+        let cpp_src = cpp_bridge(&cpp_hs, "dot", "libx.so", ".fast/lib/libx.so", &[]);
         assert!(cpp_src.contains("fa_direct"), "{cpp_src}");
         assert!(!cpp_src.contains("fa_bridge_dot::parse"), "{cpp_src}");
+        assert!(cpp_src.contains("std::getenv(\"FNR_STRICT\")"), "{cpp_src}");
+        assert!(!cpp_src.contains("FNR_dot"), "{cpp_src}");
     }
 
     #[test]
