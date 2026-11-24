@@ -629,7 +629,8 @@ pub fn compact_tools() -> Value {
                 "command": str_arr,
                 "cdb": { "type": "string", "description": "C/C++ compile_commands.json path for `scan`" },
                 "whole_app": { "type": "boolean" },
-                "lang": { "type": "string" }
+                "lang": { "type": "string" },
+                "all": { "type": "boolean", "description": "For `doctor`: check all 14 languages instead of scoping to the project." }
             }),
             req_action.clone(),
             false,
@@ -1100,8 +1101,8 @@ pub fn tools() -> Value {
         // --- Ops ---
         tool(
             "doctor",
-            "Inspect Rust toolchain, all 14 source runtimes, AI agents, and build cache sizes.",
-            json!({ "root": root_p }),
+            "Inspect Rust toolchain, project source runtimes (or all 14 with `all: true`), AI agents, and build cache sizes.",
+            json!({ "root": root_p, "all": { "type": "boolean" } }),
             json!([]),
             true,
             false,
@@ -1716,7 +1717,10 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
             check: args["check"].as_bool().unwrap_or(true),
         })?)?,
         "app_lift" => serde_json::to_value(lift::lift(&lift::LiftOptions { repo: &root })?)?,
-        "doctor" => serde_json::to_value(doctor::run(&root))?,
+        "doctor" => {
+            let all = args["all"].as_bool().unwrap_or(false);
+            serde_json::to_value(doctor::run_with_options(&root, all))?
+        }
         "clean" => serde_json::to_value(clean::clean(
             &root,
             &clean::CleanOptions {

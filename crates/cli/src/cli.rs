@@ -465,8 +465,11 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Check Rust toolchain, all 14 source language runtimes, AI agents, and build cache sizes.
+    /// Check Rust toolchain, project runtimes (pass `--all` for all 14 languages), AI agents, and build cache sizes.
     Doctor {
+        /// Check all 14 source languages, WASM, Android NDK, and all CLI agents instead of scoping to the current project.
+        #[arg(long)]
+        all: bool,
         #[arg(long)]
         json: bool,
     },
@@ -629,7 +632,7 @@ fn is_silent_cmd(cmd: &Cmd) -> bool {
             | Cmd::Map { json: true, .. }
             | Cmd::Package { json: true, .. }
             | Cmd::Setup { json: true, .. }
-            | Cmd::Doctor { json: true }
+            | Cmd::Doctor { json: true, .. }
             | Cmd::Clean { json: true, .. }
             | Cmd::App {
                 command: AppCmd::Record { json: true, .. }
@@ -1566,8 +1569,8 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                 print!("{}", setup::text(&rep));
             }
         }
-        Cmd::Doctor { json } => {
-            let rep = doctor::run(root);
+        Cmd::Doctor { all, json } => {
+            let rep = doctor::run_with_options(root, all);
             if json {
                 println!("{}", serde_json::to_string_pretty(&rep)?);
             } else {
