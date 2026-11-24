@@ -30,16 +30,17 @@
 - **Компактный MCP по умолчанию (7 инструментов, `--all-tools` для 30)**: снижает расход токенов схемы LLM на ~75% при сохранении полной обратной совместимости.
 - **Безопасный `fnr clean` и исправленные баги апстримов**: `rust-anything` (#288–#291, #300–#301) и `fast-anything` (#76), двойные kill-switch переменные (`FNR_DISABLE=1` и `FAST_ANYTHING_DISABLE=1` / `RUST_ANYTHING_MODE=old`).
 
+## Когда `fnr` реально полезен, а когда нет
+
+- **Даёт 10–200× ускорение:** тяжёлые CPU-циклы, парсинг, нечёткий поиск/дедупликация, скоринг, обработка данных и перенос CLI-утилит в бинарник (`fnr app`).
+- **Не ускорит:** SQL-запросы к БД, внешние HTTP/LLM API и `async`-ожидание сети. В таких случаях `fnr scan` честно диагностирует причину (`optimize_io_first` / `extract_pure_helper`), а не навязывает переписывание на Rust.
+- **Требования:** для сборки портов локально нужен Rust (`rustc`/`cargo`) и системный C-линкер (`cc` / Xcode CLT / VS Build Tools). `fnr doctor` по умолчанию проверяет только стек текущего проекта (для всех 14 языков есть `fnr doctor --all`).
+
 ## Быстрый старт
 
-### Установка
+### 1. Установка
 
-**Через Cargo прямо с GitHub:**
-```sh
-cargo install --git https://github.com/terrarich2004/fast-n-rust-everything fast-n-rust
-```
-
-**Готовые бинарники (Linux / macOS / Windows):**
+**Готовые бинарники (Linux / macOS / Windows — самый быстрый способ):**
 ```sh
 # Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.sh | sh
@@ -48,33 +49,44 @@ curl -fsSL https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everythin
 irm https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.ps1 | iex
 ```
 
-**Из локального клона или через Node:**
+**Через Cargo с GitHub:**
+```sh
+cargo install --git https://github.com/terrarich2004/fast-n-rust-everything fast-n-rust
+```
+
+**Из локального клона:**
 ```sh
 cargo install --path crates/cli
-# или: npx fast-n-rust --help
 ```
 
-После установки проверьте окружение и при желании подключите ИИ-агентов:
+### 2. Основной сценарий — из чата вашей IDE
+
 ```sh
-fnr doctor
-fnr setup        # пропишет `fast-n-rust mcp` и скиллы для Claude, Codex, Cursor, Gemini, Antigravity, OpenCode
+fnr setup        # пропишет MCP и скиллы для Cursor, Claude Code, Antigravity, Windsurf, VS Code Copilot, Codex, Gemini, OpenCode
+fnr doctor       # проверит Rust и рантаймы текущего проекта (`--all` — все 14 языков)
 ```
 
-### Ускорить медленные 5% одной командой
+Откройте проект в IDE и попросите агента в чате:
+> *«Проанализируй и ускорь этот проект с помощью fast-n-rust»*
+
+### 3. Или через терминал
 
 ```sh
 fnr go --agent claude --strict -- python3 app.py
 ```
 
-Или по шагам:
+Или по шагам (поддерживаются `python3`, `uv run`, `pytest`, `uvicorn`, `node`, `npm run`, `pnpm`, `yarn`, `tsx`, `ts-node`):
 
 ```sh
-fnr scan -- python3 app.py
+fnr scan -- python3 app.py                         # профилирование + диагностика узких мест
+fnr scan --duration 10 -- uvicorn main:app        # профилирование по таймеру для HTTP-серверов и ботов
+fnr scan -- npm run bench                          # автоматический разворот скриптов package.json
 fnr port
-# Напишите Rust в .fast/ports/<id>/src/lib.rs или отдайте TASK.md агенту
+# Реализуйте Rust в .fast/ports/<id>/src/lib.rs или отдайте TASK.md агенту
 fnr verify --gate
 fnr enable
-fnr bench && fnr report
+fnr bench && fnr status                            # замер 95% CI + RSS и проверка готовности к деплою
+fnr commands                                       # полный список из 30 команд (batch, fuzz, CI, package, whole-app)
 ```
 
 ### Эскалация и перенос всего приложения

@@ -67,7 +67,7 @@ pub fn get(name: &str, arguments: &Value) -> Result<Value, String> {
             (
                 "Speed up the slow 5% in Rust",
                 format!(
-                    "Optimize hot paths in `{path}` using the compact fast-n-rust MCP tools (`inspect(scan)` -> `scaffold(port)` -> edit Rust -> `check(verify, gate=true, fuzz_cases=50)` -> `switch(enable)` -> `measure(bench)`), or legacy tool names (`scan`, `port`, `verify`, `enable`, `bench`). Supports `--cdb` for C/C++ `compile_commands.json`, direct binary C ABI, `--float-tolerance`, `--min-speedup`, and `--pgo`.\n\n\
+                    "Optimize hot paths in `{path}` using the compact fast-n-rust MCP tools (`inspect(scan)` -> `scaffold(port)` -> edit Rust -> `check(verify, gate=true, fuzz_cases=50)` -> `switch(enable)` -> `measure(bench)`), or legacy tool names (`scan`, `port`, `verify`, `enable`, `bench`). Pass `duration` (seconds) to `scan` for HTTP servers/long-running apps. Check `advice.mode` and `advice.diagnosis` first: do not force Rust on `optimize_io_first`, extract pure helpers on `extract_pure_helper`, and relay any `deploy` readiness warnings after `enable`.\n\n\
                      {cmd_hint}\n\n{body}"
                 ),
             )

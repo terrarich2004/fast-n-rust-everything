@@ -42,16 +42,17 @@
 | Token-efficient 7-tool Compact MCP default (`--all-tools` for 30 legacy tools) | 8 tools | 23 tools | ✅ (7 compact / 30 full) |
 | Upstream bug fixes (`rust-anything` #288–#291, #300–#301; `fast-anything` #76) | — | — | ✅ |
 
+## When `fnr` helps — and when it doesn't
+
+- **Big wins (10–200×):** CPU-heavy loops, parsing, fuzzy matching, scoring, compression, data pipelines, and CLI tools you want to lift to a standalone Rust binary (`fnr app`).
+- **Won't speed up:** SQL/database queries, external HTTP/LLM API calls, or `async` network waits. `fnr scan` diagnoses these honestly (`optimize_io_first` / `extract_pure_helper`) instead of blindly pushing a Rust rewrite.
+- **Requirement:** Compiling ports locally requires a Rust toolchain (`rustc`/`cargo`) and a system C linker (`cc` / Xcode CLT / VS Build Tools). `fnr doctor` checks only your current project's stack by default (use `--all` for all 14 languages).
+
 ## Quick Start
 
-### Install
+### 1. Install
 
-**With Rust / Cargo (works everywhere today):**
-```sh
-cargo install --git https://github.com/terrarich2004/fast-n-rust-everything fast-n-rust
-```
-
-**Prebuilt binaries (Linux / macOS / Windows):**
+**Prebuilt binaries (Linux / macOS / Windows — fastest, no Rust wait for CLI install):**
 ```sh
 # Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.sh | sh
@@ -60,38 +61,46 @@ curl -fsSL https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everythin
 irm https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.ps1 | iex
 ```
 
-**From a local clone or Node:**
+**With Rust / Cargo:**
+```sh
+cargo install --git https://github.com/terrarich2004/fast-n-rust-everything fast-n-rust
+```
+
+**From a local clone:**
 ```sh
 cargo install --path crates/cli
-# or: npx fast-n-rust --help
 ```
 
-Then check your local toolchains and optionally register `fnr` with your AI coding agents:
+### 2. Use it from your IDE chat (recommended)
+
 ```sh
-fnr doctor
-fnr setup        # registers `fast-n-rust mcp` + skills for Claude, Codex, Cursor, Gemini, Antigravity, OpenCode
+fnr setup        # registers MCP + skills for Cursor, Claude Code, Antigravity, Windsurf, VS Code Copilot, Codex, Gemini, OpenCode
+fnr doctor       # checks Rust + only the runtimes used in the current project (pass --all for all 14 languages)
 ```
 
-### 1. Speed up the slow 5% in one command
+Then open your project in your IDE and ask your AI coding agent:
+> *"Profile and speed up this project with fast-n-rust"*
+
+### 3. Or run from the terminal
 
 ```sh
 fnr go --agent claude --strict -- python3 app.py
 ```
 
-Or step by step:
+Or step by step (works with `python3`, `uv run`, `pytest`, `uvicorn`, `node`, `npm run`, `pnpm`, `yarn`, `tsx`, `ts-node`, etc.):
 
 ```sh
-fnr scan -- python3 app.py                         # profiles app + FFI budget + Mode Advisor
+fnr scan -- python3 app.py                         # profiles app + FFI budget + bottleneck diagnosis
+fnr scan --duration 10 -- uvicorn main:app        # timed profiling for HTTP servers & bots
+fnr scan -- npm run bench                          # unwraps package.json scripts automatically
 fnr scan --cdb build/compile_commands.json -- arg  # CMake/Meson/Ninja C/C++ projects
 fnr port                                           # records up to 500 calls + Performance Blueprint + cargo test suite
 # (write Rust in .fast/ports/<id>/src/lib.rs or src/port.rs; run `cargo test` inside the crate anytime)
 fnr verify --gate --float-tolerance 1e-9           # parity + strict fmt/clippy/test/unsafe gate
 fnr fuzz --cases 100 --save-regressions          # differential/property fuzz + auto-shrunk regressions
 fnr enable                                         # portable Ship LTO (add `--native-cpu` or `--pgo`) & swap
-fnr bench && fnr status && fnr report              # interleaved 95% CI + peak RSS benchmark, matrix status & SVG card
-fnr ci --fuzz 50 --bench --min-speedup 2.0         # one-shot CI parity/lint/fuzz/speedup gate
-fnr build --deploy                                 # compile committed `.fast/ports/*` in Docker/CI (no state.json needed)
-fnr package                                        # ship `.fast/` port into `dist/` (maturin / npm / CMake)
+fnr bench && fnr status                            # 95% CI + peak RSS benchmark, port matrix & deploy readiness audit
+fnr commands                                       # list all 30 commands (batching, CI, packaging, whole-app lift)
 ```
 
 ### Measured E2E Benchmarks (Linux x86_64, Ryzen 7 4800HS)
@@ -130,11 +139,12 @@ fnr app wire . <unit> --command <name>
 fnr app lift .
 ```
 
-### Instant Kill Switches & Strict Deployment (Zero-Risk Rollback)
+### Instant Kill Switches & Deploying Enabled Ports
 
 - Hotspot swap: `FNR_DISABLE=1` (also honors `FAST_ANYTHING_DISABLE=1`), or `fnr disable --all`
 - Unit / shadow swap: `RUST_ANYTHING_MODE=old` or `RUST_ANYTHING_UNIT_<NAME>=original` or `FNR_DISABLE=1`
-- Production / CI guards: `FNR_STRICT=1` fails fast if a compiled port cannot be loaded (instead of silently falling back); `FNR_LIB_DIR=/path/to/libs` overrides `.fast/lib` lookup; `fnr build --deploy` builds `.fast/ports/*` in clean Docker/CI checkouts without `.fast/state.json`.
+- **Deploying to Docker / CI / PaaS:** `.fast/lib/` binaries are compiled for your local OS/arch and gitignored. Commit `.fast/ports/` sources, run `fnr build --deploy` in your `Dockerfile`/build step, and set `FNR_STRICT=1` so missing compiled ports fail loudly instead of silently falling back. (`fnr status` and `fnr enable` run an automatic deploy-readiness check; for JS/TS serverless/Edge hosts like Vercel/Netlify, prefer a container/VPS or a WASM crate via `fnr bridge --kind wasm`.)
+- `FNR_LIB_DIR=/path/to/libs` overrides `.fast/lib` lookup at runtime.
 
 ## Languages
 
