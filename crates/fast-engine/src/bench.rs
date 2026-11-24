@@ -350,6 +350,116 @@ pub fn first_difference(original: &[u8], rust: &[u8]) -> Option<String> {
     unreachable!()
 }
 
+fn read_proc_peak_rss_kb(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmHWM:") {
+                let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+                return Some(kb);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn time_server_load(
+    ctx: &Ctx,
+    runtime: &str,
+    args: &[String],
+    load_cmd: &str,
+    runs: usize,
+    original: bool,
+) -> Result<(Vec<f64>, Vec<u8>, Option<u64>)> {
+    let mut srv_cmd = Command::new(runtime);
+    srv_cmd
+        .args(args)
+        .current_dir(&ctx.root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if original {
+        srv_cmd.env(DISABLE_ENV, "1");
+        srv_cmd.env("FNR_DISABLE", "1");
+    } else {
+        srv_cmd.env_remove(DISABLE_ENV);
+        srv_cmd.env_remove("FNR_DISABLE");
+    }
+    let mut child = srv_cmd.spawn().context("starting server for benchmark")?;
+    let pid = child.id();
+
+    // Wait up to 3s for the server to start accepting the load command (warm-up run).
+    let mut warmup_out = Vec::new();
+    let mut ready = false;
+    let mut last_err = String::new();
+    for _ in 0..20 {
+        if let Ok(Some(st)) = child.try_wait() {
+            let mut err_buf = String::new();
+            if let Some(mut se) = child.stderr.take() {
+                use std::io::Read;
+                let _ = se.read_to_string(&mut err_buf);
+            }
+            anyhow::bail!(
+                "the server exited early ({st}) with the {} version:\n{}",
+                if original {
+                    ctx.state.lang.label()
+                } else {
+                    "Rust"
+                },
+                util::tail(&err_buf, 20)
+            );
+        }
+        let mut lc = util::shell_command(&ctx.root, load_cmd);
+        lc.stdin(Stdio::null());
+        if let Ok(out) = lc.output() {
+            if out.status.success() {
+                warmup_out = out.stdout;
+                ready = true;
+                break;
+            }
+            last_err = util::tail(&util::combined(&out), 10);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("--load command did not succeed against the server:\n{last_err}");
+    }
+
+    let mut samples = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let mut lc = util::shell_command(&ctx.root, load_cmd);
+        lc.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let start = Instant::now();
+        let out = lc.output().context("running --load benchmark command")?;
+        let took = start.elapsed().as_secs_f64();
+        if !out.status.success() {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "--load command failed ({}):\n{}",
+                out.status,
+                util::tail(&util::combined(&out), 20)
+            );
+        }
+        samples.push(took);
+    }
+
+    let rss_kb = read_proc_peak_rss_kb(pid);
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok((samples, warmup_out, rss_kb))
+}
+
 pub fn run(ctx: &Ctx, runs: usize) -> Result<BenchResult> {
     let (python, args) = ctx.state.lang.bench_command(ctx)?;
     let (python, args) = (python.as_str(), args.as_slice());
@@ -362,6 +472,70 @@ pub fn run(ctx: &Ctx, runs: usize) -> Result<BenchResult> {
         .collect();
     if ports.is_empty() {
         ui::warn("no ports are enabled yet, so before and after are the same code");
+    }
+
+    if let Some(secs) = ctx.state.duration_secs {
+        let Some(load_cmd) = ctx.state.load_command.as_deref() else {
+            let micro_note = ctx
+                .state
+                .ports
+                .values()
+                .filter_map(|p| {
+                    let m = p.verify.as_ref()?.micro.as_ref()?;
+                    let ratio = if m.rust_ns > 0.0 {
+                        m.original_ns / m.rust_ns
+                    } else {
+                        0.0
+                    };
+                    Some(format!(
+                        "Per-call speedup for `{}` from `verify`: {} ({} vs {}). ",
+                        p.id,
+                        util::times(ratio),
+                        util::nanos(m.original_ns),
+                        util::nanos(m.rust_ns)
+                    ))
+                })
+                .next()
+                .unwrap_or_default();
+            anyhow::bail!(
+                "this app was scanned as a long-running server/bot (`--duration {secs}s`) without a finite `--load` client command, so whole-process wall time is unbounded.\n{micro_note}To benchmark end-to-end throughput, re-scan with `--load \"<client command>\"` or run a finite benchmark flag (e.g. `--bench`)."
+            );
+        };
+        ui::step(format!(
+            "benchmarking server {} with --load ({runs} runs each, {} vs Rust)",
+            ui::bold(ctx.state.command.join(" ")),
+            ctx.state.lang.label()
+        ));
+        let (before, original_out, before_rss_one) =
+            time_server_load(ctx, python, args, load_cmd, runs, true)?;
+        let (after, rust_out, after_rss_one) =
+            time_server_load(ctx, python, args, load_cmd, runs, false)?;
+        let output_diff = first_difference(&original_out, &rust_out);
+        let p_value = mann_whitney_p(&before, &after);
+        let before_rss: Vec<u64> = before_rss_one.into_iter().collect();
+        let after_rss: Vec<u64> = after_rss_one.into_iter().collect();
+        let (before, after) = (
+            Stats::with_rss(&before, &before_rss),
+            Stats::with_rss(&after, &after_rss),
+        );
+        let speedup = if after.median > 0.0 {
+            before.median / after.median
+        } else {
+            0.0
+        };
+        let noisy = before.cv_pct > 5.0 || after.cv_pct > 5.0;
+        return Ok(BenchResult {
+            lang: ctx.state.lang,
+            command: ctx.state.command.clone(),
+            runs,
+            ports,
+            before,
+            after,
+            speedup,
+            noisy,
+            p_value,
+            output_diff,
+        });
     }
     ui::step(format!(
         "timing {} ({runs} runs each, {} vs Rust, interleaved)",

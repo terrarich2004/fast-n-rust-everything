@@ -10,7 +10,7 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 Install fast-n-rust (fnr) prebuilt binaries on Linux or macOS.
 
 Environment variables:
-  FNR_VERSION      Release tag (e.g. v0.2.2). Defaults to latest GitHub release.
+  FNR_VERSION      Release tag (e.g. v0.2.3). Defaults to latest GitHub release.
   FNR_INSTALL_DIR  Destination directory (default: \$HOME/.local/bin).
   FNR_REPO         GitHub owner/repo (default: terrarich2004/fast-n-rust-everything).
 EOF
@@ -52,7 +52,7 @@ if [ -z "$VERSION" ]; then
   LATEST_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)"
   case "$LATEST_URL" in
     */tag/*) VERSION="${LATEST_URL##*/tag/}" ;;
-    *) VERSION="v0.2.2" ;;
+    *) VERSION="v0.2.3" ;;
   esac
 fi
 
@@ -100,6 +100,42 @@ fi
 echo "Installed fast-n-rust and fnr to ${INSTALL_DIR}"
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
-  *) echo "Add to your PATH: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
+  *)
+    UPDATED_RC=""
+    if [ "${FNR_NO_MODIFY_PATH:-0}" != "1" ]; then
+      RC_FILE=""
+      case "${SHELL:-}" in
+        */zsh) RC_FILE="$HOME/.zshrc" ;;
+        */bash)
+          if [ -f "$HOME/.bashrc" ]; then
+            RC_FILE="$HOME/.bashrc"
+          else
+            RC_FILE="$HOME/.profile"
+          fi
+          ;;
+        *)
+          if [ "$OS" = "Darwin" ]; then
+            RC_FILE="$HOME/.zshrc"
+          elif [ -f "$HOME/.bashrc" ]; then
+            RC_FILE="$HOME/.bashrc"
+          else
+            RC_FILE="$HOME/.profile"
+          fi
+          ;;
+      esac
+      if [ -n "$RC_FILE" ]; then
+        if [ ! -f "$RC_FILE" ] || (! grep -Fq "$INSTALL_DIR" "$RC_FILE" && ! grep -Fq "# >>> fast-n-rust >>>" "$RC_FILE"); then
+          mkdir -p "$(dirname "$RC_FILE")"
+          printf '\n# >>> fast-n-rust >>>\nexport PATH="%s:$PATH"\n# <<< fast-n-rust <<<\n' "$INSTALL_DIR" >> "$RC_FILE"
+          UPDATED_RC="$RC_FILE"
+        fi
+      fi
+    fi
+    if [ -n "$UPDATED_RC" ]; then
+      echo "Added ${INSTALL_DIR} to ${UPDATED_RC}."
+    fi
+    echo "Run this in your current terminal (or open a new one):"
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\" && fnr setup"
+    ;;
 esac
 "${INSTALL_DIR}/fnr" --version || true

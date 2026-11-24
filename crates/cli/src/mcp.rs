@@ -629,6 +629,7 @@ pub fn compact_tools() -> Value {
                 "command": str_arr,
                 "cdb": { "type": "string", "description": "C/C++ compile_commands.json path for `scan`" },
                 "duration": { "type": "integer", "description": "Stop `scan` profiling after N seconds (for servers/long-running apps on Python, Node, or Bun)." },
+                "load": { "type": "string", "description": "Optional client load command executed during timed server `scan` / `port` / `bench`." },
                 "whole_app": { "type": "boolean" },
                 "lang": { "type": "string" },
                 "all": { "type": "boolean", "description": "For `doctor`: check all 14 languages instead of scoping to the project." }
@@ -724,12 +725,14 @@ pub fn compact_tools() -> Value {
         ),
         tool(
             "ship",
-            "Run end-to-end automated `go` loop (scan -> port -> agent -> gate -> enable -> bench) or `package` a verified port/unit for distribution.",
+            "Run end-to-end automated `go` loop, `package` a verified port/unit, or `deploy` (generate Dockerfile/CI workflow).",
             json!({
-                "action": { "type": "string", "enum": ["go", "package"] },
+                "action": { "type": "string", "enum": ["go", "package", "deploy"] },
                 "root": root_p,
                 "command": str_arr,
                 "cdb": { "type": "string" },
+                "duration": { "type": "integer" },
+                "load": { "type": "string" },
                 "agent": { "type": "string" },
                 "strict": { "type": "boolean" },
                 "float_tolerance": { "type": "number" },
@@ -739,7 +742,9 @@ pub fn compact_tools() -> Value {
                 "crate": { "type": "string" },
                 "out": { "type": "string" },
                 "native_cpu": { "type": "boolean" },
-                "dry_run": { "type": "boolean" }
+                "dry_run": { "type": "boolean" },
+                "write": { "type": "boolean" },
+                "force": { "type": "boolean" }
             }),
             req_action.clone(),
             false,
@@ -785,7 +790,8 @@ pub fn tools() -> Value {
                 "root": root_p,
                 "command": cmd_p,
                 "cdb": { "type": "string", "description": "C/C++ compile_commands.json path." },
-                "duration": { "type": "integer", "description": "Stop profiling after N seconds (for servers/long-running apps on Python, Node, or Bun)." }
+                "duration": { "type": "integer", "description": "Stop profiling after N seconds (for servers/long-running apps on Python, Node, or Bun)." },
+                "load": { "type": "string", "description": "Client load command run while the server starts during timed profiling/recording/bench." }
             }),
             json!([]),
             false,
@@ -1221,12 +1227,17 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
                 strings("command")
             };
             let duration_secs = args["duration"].as_u64();
+            let load_command = args["load"].as_str().map(str::to_string);
             let out = fnr_fast::pipeline::scan_with_options(
                 &root,
                 command,
-                fnr_fast::pipeline::ScanOptions { duration_secs },
+                fnr_fast::pipeline::ScanOptions {
+                    duration_secs,
+                    load_command: load_command.clone(),
+                },
             )?;
-            let advice = synergy::advise_mode(&out);
+            let advice =
+                synergy::advise_mode_with_context(&out, duration_secs, load_command.as_deref());
             json!({ "scan": out, "advice": advice })
         }
         "port" => serde_json::to_value(synergy::port_and_enrich(
@@ -1307,6 +1318,8 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
                         strict: args["strict"].as_bool().unwrap_or(false),
                         float_tolerance: args["float_tolerance"].as_f64(),
                         min_speedup: args["min_speedup"].as_f64(),
+                        duration_secs: args["duration"].as_u64(),
+                        load_command: args["load"].as_str(),
                         print_progress: false,
                     },
                 )?)?
@@ -1652,6 +1665,12 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
             let crates: Vec<PathBuf> = strings("crates").into_iter().map(Into::into).collect();
             serde_json::to_value(port_map::map(&root, &crates)?)?
         }
+        "deploy" => serde_json::to_value(synergy::generate_deploy_plan(
+            &root,
+            args["target"].as_str(),
+            args["write"].as_bool().unwrap_or(false),
+            args["force"].as_bool().unwrap_or(false),
+        )?)?,
         "package" => {
             let target = args["target"]
                 .as_str()

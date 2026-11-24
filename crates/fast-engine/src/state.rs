@@ -26,6 +26,10 @@ pub struct State {
     /// Folder Python imports the app's modules from, relative to the project.
     pub base: String,
     pub wall: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_command: Option<String>,
     pub hotspots: Vec<Hotspot>,
     pub ports: BTreeMap<String, Port>,
     pub bench: Option<BenchResult>,
@@ -85,15 +89,26 @@ pub struct Verify {
     pub source_hash: Option<String>,
 }
 
-/// The forms a source may take in the file: as recorded, or with const and let swapped (a Node
-/// port switches its function's const to let while enabled).
-fn forms(source: &str) -> [String; 3] {
+/// The forms a source may take in the file: as recorded, with const and let swapped (a Node
+/// port switches its function's const to let while enabled), or with `function f` switched to
+/// `let f = function f` while an enabled JS/TS function port is active.
+fn forms(source: &str) -> Vec<String> {
     let source = source.replace("\r\n", "\n");
-    [
+    let mut out = vec![
         source.replacen("const ", "let ", 1),
         source.replacen("let ", "const ", 1),
-        source,
-    ]
+        source.clone(),
+    ];
+    if let Some(after_fn) = source.split("function ").nth(1) {
+        let fname: String = after_fn
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect();
+        if !fname.is_empty() {
+            out.push(source.replacen("function ", &format!("let {fname} = function "), 1));
+        }
+    }
+    out
 }
 
 /// The file without fnr's own marked blocks (fnr or legacy fast-anything): an enabled Java, Go, C#,

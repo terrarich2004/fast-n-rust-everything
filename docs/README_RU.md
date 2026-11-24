@@ -1,72 +1,62 @@
 <h1 align="center">fast-n-rust (<code>fnr</code>)</h1>
 
 <p align="center">
-  <b>Перепишите на Rust те самые 5%, которые тормозят — или поднимите весь проект в чистый Rust.</b><br>
-  Каждое изменение доказывается на реальном записанном поведении. Создано для людей и ИИ-агентов.
+  <b>Ускорьте тормозящие 5% вашего приложения на Rust — или соберите весь скрипт в один быстрый бинарник.</b><br>
+  Каждое изменение автоматически проверяется на реальном записанном поведении, чтобы ИИ-агент ничего не сломал.
 </p>
 
 <p align="center">
-  <a href="../README.md">English</a> · <a href="#быстрый-старт">Быстрый старт</a> · <a href="#почему-fast-n-rust">Сравнение</a> · <a href="#языки">14 языков</a> · <a href="#mcp-сервер-и-агенты">MCP и агенты</a> · <a href="../NOTICE">Атрибуция (MIT)</a>
+  <a href="../README.md">English</a> · <a href="#быстрый-старт">Быстрый старт</a> · <a href="#3-реальных-сценария">Сценарии</a> · <a href="#когда-fnr-реально-полезен-а-когда-нет">Когда нужен</a> · <a href="#бенчмарки-и-что-под-капотом">Бенчмарки и детали</a> · <a href="../NOTICE">Атрибуция (MIT)</a>
 </p>
 
 ---
 
-**`fast-n-rust`** (`fnr`) объединяет лучшие движки [**`erkamyaman/rust-anything`**](https://github.com/erkamyaman/rust-anything) и [**`EL4CTEO/fast-anything`**](https://github.com/EL4CTEO/fast-anything) в одном Cargo workspace, единой CLI-утилите (`fast-n-rust` и короткий алиас `fnr`) и многопоточном MCP-сервере — с перекрёстной синергией и исправлением открытых багов обоих апстримов.
+**`fast-n-rust`** (`fnr`) подключается прямо к чату вашей IDE (**Cursor, Antigravity, Windsurf, Claude Code, VS Code Copilot, Codex, Gemini, OpenCode**) через MCP и скиллы — или работает из терминала.
 
-- Нужно быстро ускорить горячую функцию в 10–100× без переписывания всего приложения? Используйте **Fast 5% Hotspot Loop** (`fnr go`, `fnr scan`, `fnr port`, `fnr verify --gate`, `fnr enable`).
-- Нужен многопоточный **Rayon `--batch`**, фаззинг (**`fuzz`**), теневой трафик (**`shadow`**) или пошаговый **Strangler-Fig перенос всего приложения в чистый Rust**? Запустите **`fnr escalate <id>`** или **`fnr app record` → `app front-door` → `app wire` → `app lift`**.
+## 3 реальных сценария
 
-## Почему `fast-n-rust`?
-
-- **Режим «5% → Whole-App», Mode Advisor и оценка FFI-бюджета**: `fnr scan` оценивает накладные расходы FFI (помечая `[direct ABI]` там, где работает бинарный C ABI) и подсказывает оптимальную стратегию: точечный hotspot-порт, `--batch` на все ядра или whole-app перенос.
-- **Трёхуровневый FFI (`fa_direct` → `fa_bin` → `fa_call`)**: прямой нуль-JSON C ABI для скаляров/строк/срезов (`C`, `C++`, `Go`, `C#`, `Java FFM`, `Kotlin`, `PHP`), компактный бинарный wire v1 (`fa_bin`) без DOM-парсинга для коллекций и структур (`C++`, `Java`, `C#`, `Go`, `PHP`, `Ruby`) и универсальный JSON fallback (`fa_call`). На `micro-ffi-c` (300 тыс. вызовов) `fa_direct` (`56.95ms`, `189.8ns/вызов`) в **3.23×** быстрее JSON (`183.77ms`), а отказ от JSON DOM в `fuzzy-dedupe-cpp` снизил пиковый RSS в **3.2×** (`25.6 MB` → **`7.8 MB`**, на уровне чистого C++).
-- **Дифференциальный фаззинг, авто-минимизация и `--save-regressions`**: для C, C++, Java, C#, Python, Node/TS, PHP, Ruby и R фаззер сравнивает порт против реального оракула исходного кода, сжимает контрпримеры и сохраняет их в `recordings.jsonl`.
-- **Портативный `ship` LTO + явный `--native-cpu` и `--pgo`**: по умолчанию релизы переносимы, `--native-cpu` добавляет `-C target-cpu=native` (на `mandelbrot-c` это ускорило порт с `204.9ms` / **29.64×** до `163.0ms` / **37.27×**), а `--pgo` использует `llvm-profdata` из того же LLVM-семейства (проверено вживую; на микробенчмарках PGO оказался немного медленнее: `177.5ms` на C, `462.2ms` на C++, `25.2ms` на Python).
-- **Единый `fnr status` и чистый `--json`**: показывает и `.fast`-хотспоты (транспорт, профиль сборки, verify), и `rust/`-крейты без примесей прогресса в JSON.
-- **Для обычных разработчиков без ИИ**: поддержка C/C++ `compile_commands.json` (`--cdb`), генерация обычного `tests/recorded_parity.rs` (`cargo test` работает напрямую), `fnr fuzz` / `--float-tolerance` / `known-diffs` / `fnr package` прямо на `.fast/` портах, статистический `fnr bench` (95% CI, CV%, Mann-Whitney p-value, peak RSS) и `fnr ci`.
-- **Обогащение `TASK.md`**: `fnr port` добавляет статические риски, `Performance Blueprint` (SIMD/ILP без FMA, work-stealing, ASCII `&[u8]` fast-path), рекомендации крейтов из `crates.toml` и чек-лист `gate`.
-- **`fnr escalate <id>`**: переносит hotspot-порт из `.fast/ports/<id>` в `rust/`-крейт с автоматическим отключением активного inline-патча, автоподстановкой совместимой реализации (`C/FFI`, `PyO3`, `napi-rs`) в `src/port.rs`, сохранением зависимостей, `known-diffs.jsonl`, вызовов (`recorded-inputs.jsonl`) и `hotspot_reference.rs`.
-- **Портативный деплой и Docker/CI**: шимы больше не зашивают абсолютные пути машины разработчика; в чистом чекауте без `state.json` работает `fnr build --deploy`, `FNR_LIB_DIR` задаёт путь к библиотекам, а `FNR_STRICT=1` не даёт коду молча откатиться на медленный оригинал при отсутствии `.so`/`.node`. Поддерживаются read-only методы классов в Python/TS (`self`/`this`) и авто-разворачивание `tsx` / `npx`.
-- **Компактный MCP по умолчанию (7 инструментов, `--all-tools` для 30)**: снижает расход токенов схемы LLM на ~75% при сохранении полной обратной совместимости.
-- **Безопасный `fnr clean` и исправленные баги апстримов**: `rust-anything` (#288–#291, #300–#301) и `fast-anything` (#76), двойные kill-switch переменные (`FNR_DISABLE=1` и `FAST_ANYTHING_DISABLE=1` / `RUST_ANYTHING_MODE=old`).
+1. **Ускорить тормозящую функцию в 10–200× без переписывания всего проекта**
+   - Тяжёлый парсинг CSV/JSON/логов, нечёткий поиск и дедупликация, скоринг, обработка данных, CPU-циклы в Python, TypeScript/Node, Go, Java, C# и др.
+   - Промпт в чат IDE: *«Найди, что тормозит в этом проекте, и безопасно ускорь через fast-n-rust»*
+2. **Ускорить код для браузера / Vercel / Edge через WebAssembly (WASM)**
+   - Браузер и serverless-платформы (Vercel, Netlify, Cloudflare) не грузят нативные `.node`/`.so`-библиотеки — горячую TS/JS-функцию можно вынести в кроссплатформенный WASM (`fnr escalate <id>` + `fnr bridge . <unit> --kind wasm`).
+3. **Упаковать Python/JS-скрипт или CLI-утилиту в один быстрый бинарник (`.exe`)**
+   - Конечным пользователям не нужны Python или Node.js; пошаговый перенос с проверкой совпадения на реальных прогонах.
+   - Промпт в чат IDE: *«Собери этот скрипт в один самостоятельный бинарник на Rust через fast-n-rust»*
 
 ## Когда `fnr` реально полезен, а когда нет
 
 - **Даёт 10–200× ускорение:** тяжёлые CPU-циклы, парсинг, нечёткий поиск/дедупликация, скоринг, обработка данных и перенос CLI-утилит в бинарник (`fnr app`).
-- **Не ускорит:** SQL-запросы к БД, внешние HTTP/LLM API и `async`-ожидание сети. В таких случаях `fnr scan` честно диагностирует причину (`optimize_io_first` / `extract_pure_helper`), а не навязывает переписывание на Rust.
-- **Требования:** для сборки портов локально нужен Rust (`rustc`/`cargo`) и системный C-линкер (`cc` / Xcode CLT / VS Build Tools). `fnr doctor` по умолчанию проверяет только стек текущего проекта (для всех 14 языков есть `fnr doctor --all`).
+- **Не ускорит:** SQL-запросы к БД, внешние HTTP/OpenAI API и `async`-ожидание сети. В таких случаях `fnr scan` честно диагностирует причину (`optimize_io_first`), а не навязывает переписывание на Rust.
+- **Требования:** для локальной сборки портов нужны `rustc`/`cargo` и системный C-линкер (`cc` / Xcode CLT / VS C++ Build Tools). `fnr doctor` проверяет только стек текущего проекта (для всех 14 языков — `fnr doctor --all`).
 
 ## Быстрый старт
 
-### 1. Установка
+### 1. Установка (готовые бинарники для Linux / macOS / Windows)
 
-**Готовые бинарники (Linux / macOS / Windows — самый быстрый способ):**
 ```sh
-# Linux / macOS
+# Linux / macOS (сам прописывает PATH в профиль оболочки)
 curl -fsSL https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.sh | sh
+```
 
-# Windows (PowerShell)
+```powershell
+# Windows PowerShell (сам добавляет папку в User PATH)
 irm https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.ps1 | iex
 ```
 
-**Через Cargo с GitHub:**
+Или через Cargo из GitHub:
 ```sh
 cargo install --git https://github.com/terrarich2004/fast-n-rust-everything fast-n-rust
-```
-
-**Из локального клона:**
-```sh
-cargo install --path crates/cli
 ```
 
 ### 2. Основной сценарий — из чата вашей IDE
 
 ```sh
-fnr setup        # пропишет MCP и скиллы для Cursor, Claude Code, Antigravity, Windsurf, VS Code Copilot, Codex, Gemini, OpenCode
-fnr doctor       # проверит Rust и рантаймы текущего проекта (`--all` — все 14 языков)
+fnr setup        # пропишет MCP и скиллы для Cursor, Antigravity, Claude Code, Windsurf, VS Code, Codex, Gemini, OpenCode
+fnr doctor       # проверит Rust и рантаймы текущего проекта
 ```
 
-Откройте проект в IDE и попросите агента в чате:
+Откройте проект в IDE и напишите агенту:
 > *«Проанализируй и ускорь этот проект с помощью fast-n-rust»*
 
 ### 3. Или через терминал
@@ -78,29 +68,30 @@ fnr go --agent claude --strict -- python3 app.py
 Или по шагам (поддерживаются `python3`, `uv run`, `pytest`, `uvicorn`, `node`, `npm run`, `pnpm`, `yarn`, `tsx`, `ts-node`):
 
 ```sh
-fnr scan -- python3 app.py                         # профилирование + диагностика узких мест
-fnr scan --duration 10 -- uvicorn main:app        # профилирование по таймеру для HTTP-серверов и ботов
-fnr scan -- npm run bench                          # автоматический разворот скриптов package.json
-fnr port
-# Реализуйте Rust в .fast/ports/<id>/src/lib.rs или отдайте TASK.md агенту
+fnr scan -- python3 app.py                                           # профилирование + диагностика узких мест
+fnr scan --duration 4 --load "curl -s http://127.0.0.1:8000/run" -- uvicorn main:app  # живые HTTP-серверы и боты
+fnr port                                                             # запись до 500 вызовов + Performance Blueprint + cargo test
+# Реализуйте Rust в .fast/ports/<id>/src/lib.rs (или поручите агенту в IDE)
 fnr verify --gate
 fnr enable
-fnr bench && fnr status                            # замер 95% CI + RSS и проверка готовности к деплою
-fnr commands                                       # полный список из 30 команд (batch, fuzz, CI, package, whole-app)
+fnr bench && fnr status                                              # замер 95% CI + RSS и проверка готовности к деплою
+fnr deploy --write                                                   # сгенерирует готовые Dockerfile.fnr и GitHub Actions CI
+fnr commands                                                         # полный список команд (batch, fuzz, CI, package, whole-app)
 ```
 
-### Эскалация и перенос всего приложения
+---
 
-```sh
-fnr escalate app.dedupe --batch dedupe:names
-fnr analyze . --whole-app
-fnr app record . -- python3 cli.py
-fnr app front-door .
-fnr app wire . <unit> --command <name>
-fnr app lift .
-```
+## Бенчмарки и что под капотом
 
-## Замеры на живых прогонах (Linux x86_64, Ryzen 7 4800HS)
+**`fast-n-rust`** (`fnr`) объединяет движки [**`erkamyaman/rust-anything`**](https://github.com/erkamyaman/rust-anything) и [**`EL4CTEO/fast-anything`**](https://github.com/EL4CTEO/fast-anything) в одном Cargo workspace, единой CLI-утилите и многопоточном MCP-сервере — с перекрёстной синергией и исправлением багов апстримов.
+
+- **Режим «5% → Whole-App» и Mode Advisor**: `fnr scan` оценивает накладные расходы FFI (помечая `[direct ABI]` там, где работает бинарный C ABI) и честно подсказывает: точечный порт, `--batch` на все ядра, отказ от Rust при I/O-узком месте (`optimize_io_first`), `--load` при простое сервера (`no_workload_exercised`) или `whole-app` перенос.
+- **Трёхуровневый FFI (`fa_direct` → `fa_bin` → `fa_call`)**: прямой нуль-JSON C ABI для скаляров/строк/срезов (`C`, `C++`, `Go`, `C#`, `Java FFM`, `Kotlin`, `PHP`), компактный бинарный wire v1 (`fa_bin`) без DOM-парсинга (`C++`, `Java`, `C#`, `Go`, `PHP`, `Ruby`) и JSON fallback (`fa_call`). На `micro-ffi-c` (300 тыс. вызовов) `fa_direct` (`56.95ms`) в **3.23×** быстрее JSON (`183.77ms`), а отказ от JSON DOM в `fuzzy-dedupe-cpp` снизил пиковый RSS в **3.2×** (`25.6 MB` → **`7.8 MB`**).
+- **Строгий TypeScript и Python dataclasses**: для Python автоматически генерируются `#[derive(FromPyObject)]`, для TypeScript — `#[napi(object)]` из `interface`/`type` и строгие `tsc`-совместимые шимы (`export let f = function f`), полностью обратимые через `fnr disable`.
+- **Дифференциальный фаззинг, `--native-cpu`, `--pgo` и `fnr deploy --write`**: фаззер сжимает контрпримеры и сохраняет их в `recordings.jsonl`; `fnr deploy --write` генерирует `Dockerfile.fnr` (с `fnr build --deploy` и `ENV FNR_STRICT=1`) и `.github/workflows/fnr-deploy.yml`.
+- **Компактный MCP по умолчанию (7 инструментов, `--all-tools` для 30)**: снижает расход токенов схемы LLM на ~75%. Двойные kill-switch переменные (`FNR_DISABLE=1` и `FAST_ANYTHING_DISABLE=1` / `RUST_ANYTHING_MODE=old`).
+
+### Замеры на живых прогонах (Linux x86_64, Ryzen 7 4800HS)
 
 | Пример и объём задачи | Транспорт | До | После | Ускорение | Память (RSS) / заметка |
 | :--- | :--- | :---: | :---: | :---: | :--- |
@@ -112,14 +103,23 @@ fnr app lift .
 | `examples/mandelbrot-c` (C, 8 масштабов × 2 000 итер.) | `fa_direct` ABI | 6077.2ms | 163.0ms | **37.27×** | с `--native-cpu` (`ship`: 204.9ms / 29.64×) |
 | `examples/micro-ffi-c` (C, 300 тыс. микровызовов) | `fa_direct` vs `fa_call` | 54.92ms (C) | 56.95ms | 0.96× к C | **В 3.23× быстрее**, чем JSON `fa_call` (`183.77ms`); заблокировано защитой без `--force` |
 
-### Как понимать цифры в таблице (без сложных терминов)
-
-- **Почему для разных языков разное время (23 мс на Python и 363 мс на C++):** размер входных данных подобран так, чтобы исходный код работал примерно 3–5 секунд. Медленный Python перебирает **700 имён** (~245 тыс. пар), а скомпилированный C++ — **6 000 имён** (~18 млн пар, то есть **в 73 раза больше работы**). Поэтому на C++ задача в 73 раза тяжелее, а по скорости передачи и расчёта он почти в 3 раза быстрее варианта с JSON у прародителя.
-- **Почему в `mandelbrot-c` «До» — 6 секунд, а не 0.43 секунды:** в этом тесте объём вычислений **в 14 раз больше**, чем в старой таблице `fast-anything`. На более тяжёлой задаче Rust-версия ускорила оптимизированный `clang -O2` в **37.27 раза** (против `3.4×` в старом примере).
-- **Почему в Java итог 1.4 секунды (2.95×):** сама переписанная на Rust функция работает **в 20.8 раза быстрее** (против `11×` у прародителя). Но бенчмарк замеряет весь процесс целиком от старта до выхода, а команда `java App.java` при каждом запуске тратит ~1.3 секунды просто на старт JVM и компиляцию `.java`-файлов ещё до запуска расчёта. В обычном `.jar`-приложении или сервере действует полный выигрыш **20.8×**.
-- **Почему `micro-ffi-c` показал `0.96×`:** это специальная «проверка на дурака» — крошечную функцию на C вызывают 300 тысяч раз подряд по одной. Выносить настолько мелкий шаг наружу невыгодно, и `fnr` автоматически блокирует такую замену без `--force`, советуя портировать внешний цикл целиком (при этом прямой мост `fa_direct` всё равно в **3.23×** быстрее JSON).
+**Как понимать цифры в таблице:**
+- **Почему для разных языков разное время (23 мс на Python и 363 мс на C++):** размер входных данных подобран так, чтобы исходный код работал 3–5 секунд. Python перебирает **700 имён** (~245 тыс. пар), а C++ — **6 000 имён** (~18 млн пар, то есть **в 73 раза больше работы**).
+- **Почему в Java итог 1.4 секунды (2.95×):** сама функция на Rust быстрее **в 20.8 раза**, но `java App.java` при каждом запуске тратит ~1.3 секунды на старт JVM и компиляцию перед началом расчёта. В `.jar` или сервере действует полный выигрыш **20.8×**.
+- **Почему `micro-ffi-c` показал `0.96×`:** это защита от бессмысленного вызова крошечной функции C по одной 300 тыс. раз через FFI — `fnr` блокирует такую замену без `--force` и советует портировать внешний цикл.
 
 **Область проверки**: вживую на Linux x86_64 прогнаны 6 установленных рантаймов (C, C++, Python, TypeScript/Node, Java 25, C# .NET 10); для Go, PHP, Ruby, R и Kotlin (нет локальных рантаймов) пройдены unit-тесты, Windows/macOS на этом хосте не запускались.
+
+### Эскалация и перенос всего приложения
+
+```sh
+fnr escalate app.dedupe --batch dedupe:names
+fnr analyze . --whole-app
+fnr app record . -- python3 cli.py
+fnr app front-door .
+fnr app wire . <unit> --command <name>
+fnr app lift .
+```
 
 ## Языки
 

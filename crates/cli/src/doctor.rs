@@ -136,6 +136,19 @@ fn classify_entry(path: &Path, stacks: &mut BTreeSet<ProjectStack>) {
             stacks.insert(ProjectStack::R);
         }
         Some("ps1") => {
+            let fname = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            let is_installer = matches!(
+                fname.as_deref(),
+                Some("install.ps1" | "uninstall.ps1" | "setup.ps1" | "build.ps1" | "release.ps1")
+            );
+            if !is_installer {
+                stacks.insert(ProjectStack::PowerShell);
+            }
+        }
+        Some("psm1" | "psd1") => {
             stacks.insert(ProjectStack::PowerShell);
         }
         _ => {}
@@ -153,6 +166,18 @@ pub fn detect_project_stacks(root: &Path) -> Vec<ProjectStack> {
         "dist",
         "build",
     ];
+    const NON_APP_DIRS: &[&str] = &["examples", "tests", "docs", "npm", "skills", "commands"];
+    let has_root_manifest = [
+        "Cargo.toml",
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "Gemfile",
+        "composer.json",
+    ]
+    .iter()
+    .any(|m| root.join(m).is_file());
     let mut stacks = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -164,7 +189,10 @@ pub fn detect_project_stacks(root: &Path) -> Vec<ProjectStack> {
         } else if path.is_dir() {
             let dir_name = entry.file_name();
             let dir_str = dir_name.to_string_lossy();
-            if SKIP_DIRS.contains(&dir_str.as_ref()) || dir_str.starts_with('.') {
+            if SKIP_DIRS.contains(&dir_str.as_ref())
+                || dir_str.starts_with('.')
+                || (has_root_manifest && NON_APP_DIRS.contains(&dir_str.as_ref()))
+            {
                 continue;
             }
             if let Ok(sub_entries) = std::fs::read_dir(&path) {
@@ -356,9 +384,19 @@ pub fn run_with_options(project_root: &Path, show_all: bool) -> UnifiedDoctorRep
     for c in &mut base.checks {
         if c.name == "cargo" && c.status != Status::Ok {
             c.fix = Some(if cfg!(windows) {
-                "winget install Rustlang.Rustup".to_string()
+                "winget install Rustlang.Rustup  (or https://rustup.rs)".to_string()
             } else {
-                "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh".to_string()
+                "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+                    .to_string()
+            });
+        } else if c.name == "cc" && c.status != Status::Ok {
+            c.fix = Some(if cfg!(windows) {
+                "winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override \"--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"".to_string()
+            } else if cfg!(target_os = "macos") {
+                "xcode-select --install".to_string()
+            } else {
+                "sudo apt install build-essential  (or dnf install gcc / pacman -S base-devel)"
+                    .to_string()
             });
         }
     }
@@ -650,6 +688,31 @@ mod tests {
             .collect();
         assert_eq!(node_extra, vec!["bun", "deno"]);
         assert!(text(&node_rep).contains("project scope: node"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn powershell_installer_scripts_do_not_trigger_powershell_stack() {
+        let base = std::env::temp_dir().join(format!("fnr-doc-ps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("Cargo.toml"), "[package]\nname=\"demo\"\n").unwrap();
+        std::fs::write(base.join("install.ps1"), "Write-Host 'hi'\n").unwrap();
+        assert!(
+            !detect_project_stacks(&base).contains(&ProjectStack::PowerShell),
+            "install.ps1 next to Cargo.toml must not classify repo as PowerShell"
+        );
+
+        let ps_app = base.join("ps_app");
+        std::fs::create_dir_all(&ps_app).unwrap();
+        std::fs::write(ps_app.join("app.ps1"), "Write-Output 1\n").unwrap();
+        assert!(detect_project_stacks(&ps_app).contains(&ProjectStack::PowerShell));
+
+        let ps_mod = base.join("ps_mod");
+        std::fs::create_dir_all(&ps_mod).unwrap();
+        std::fs::write(ps_mod.join("TextTools.psm1"), "function Foo {}\n").unwrap();
+        assert!(detect_project_stacks(&ps_mod).contains(&ProjectStack::PowerShell));
 
         let _ = std::fs::remove_dir_all(&base);
     }

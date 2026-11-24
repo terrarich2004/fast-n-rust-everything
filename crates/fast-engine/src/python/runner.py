@@ -785,17 +785,11 @@ def project_relative(root, path):
 
 # ------------------------------------------------------------------ modes
 
-def cmd_profile(job, argv):
+def _arm_duration_timers(duration):
     import _thread
-    import cProfile
-    import pstats
     import signal
     import threading
 
-    kind, target, rest = parse_target(argv)
-    entry, base = prepare_path(kind, target)
-    root = job["root"]
-    duration = job.get("duration")
     timers = []
     if isinstance(duration, (int, float)) and duration > 0:
         def _soft_stop():
@@ -812,6 +806,17 @@ def cmd_profile(job, argv):
         t2.daemon = True
         t2.start()
         timers.append(t2)
+    return timers
+
+
+def cmd_profile(job, argv):
+    import cProfile
+    import pstats
+
+    kind, target, rest = parse_target(argv)
+    entry, base = prepare_path(kind, target)
+    root = job["root"]
+    timers = _arm_duration_timers(job.get("duration"))
 
     prof = cProfile.Profile()
     sys.modules["_fast_anything_state"] = ChildState("profile", os.environ.get("FAST_ANYTHING_CHILDREN", ""))
@@ -863,10 +868,12 @@ def cmd_profile(job, argv):
 class Recorder:
     """Keeps a uniform sample of up to `limit` calls to the wrapped function (reservoir sampling)."""
 
-    def __init__(self, limit, seed, instance_method=False, self_fields=()):
+    def __init__(self, limit, seed, instance_method=False, self_fields=(), stop_on_limit=False):
         self.limit, self.rng = limit, random.Random(seed)
         self.instance_method = bool(instance_method)
         self.self_fields = list(self_fields or ())
+        self.stop_on_limit = bool(stop_on_limit)
+        self._stopped = False
         self.reset()
 
     def reset(self):
@@ -915,6 +922,10 @@ class Recorder:
                 except Unsupported as e:
                     self.skipped += 1
                     self.unsupported.add(str(e))
+            if self.stop_on_limit and not self._stopped and len(self.kept) >= self.limit:
+                self._stopped = True
+                import _thread
+                _thread.interrupt_main()
             return result
 
         return recorder
@@ -1029,15 +1040,25 @@ def cmd_record(job, argv):
     kind, target, rest = parse_target(argv)
     prepare_path(kind, target)
     os.environ[DISABLE_ENV] = "1"  # always record the original Python
+    duration = job.get("duration")
+    timed = isinstance(duration, (int, float)) and duration > 0
     recorder = Recorder(
         int(job["limit"]),
         0xFA57,
         job.get("instance_method", False),
         job.get("self_fields", ()),
+        stop_on_limit=timed,
     )
     recorder.install(job)
     sys.modules["_fast_anything_state"] = ChildState("record", os.environ.get("FAST_ANYTHING_CHILDREN", ""), recorder)
-    run_target(kind, target, rest)
+    timers = _arm_duration_timers(duration)
+    try:
+        run_target(kind, target, rest)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for t in timers:
+            t.cancel()
     del sys.modules["_fast_anything_state"]
     for out in children(".jsonl"):
         try:

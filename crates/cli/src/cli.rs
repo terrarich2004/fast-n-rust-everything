@@ -104,6 +104,12 @@ pub enum Cmd {
         /// Unit-mode only: source language override.
         #[arg(long, value_enum)]
         lang: Option<Lang>,
+        /// Stop profiling/recording after N seconds (for servers/bots on Python, Node, or Bun).
+        #[arg(long)]
+        duration: Option<u64>,
+        /// Client load command run while the server starts during `--duration` scan/port/bench.
+        #[arg(long)]
+        load: Option<String>,
         /// How you run your app (or app args when `--cdb` is set), after `--`.
         #[arg(last = true)]
         command: Vec<String>,
@@ -116,6 +122,9 @@ pub enum Cmd {
         /// Stop profiling after N seconds (for servers, bots, and long-running apps on Python, Node, or Bun).
         #[arg(long)]
         duration: Option<u64>,
+        /// Client load command run while the server starts (auto-enables timed profiling and powers `fnr port`/`fnr bench`).
+        #[arg(long)]
+        load: Option<String>,
         /// Print machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -500,6 +509,20 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Generate ready-to-use Docker and GitHub Actions deployment configs for `.fast/` and `rust/` ports.
+    Deploy {
+        /// Target config to generate: `all` (default), `docker`, or `github-actions`.
+        #[arg(long)]
+        target: Option<String>,
+        /// Write generated files to disk (default prints a preview).
+        #[arg(long)]
+        write: bool,
+        /// Overwrite existing deployment files when `--write` is set.
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// List all commands including deep unit-migration, fuzzing, CI, packaging, and whole-app lift.
     Commands,
     /// Generate shell completion scripts for `fast-n-rust` and `fnr`.
@@ -647,6 +670,7 @@ fn is_silent_cmd(cmd: &Cmd) -> bool {
             | Cmd::Setup { json: true, .. }
             | Cmd::Doctor { json: true, .. }
             | Cmd::Clean { json: true, .. }
+            | Cmd::Deploy { json: true, .. }
             | Cmd::App {
                 command: AppCmd::Record { json: true, .. }
                     | AppCmd::Replay { json: true, .. }
@@ -658,6 +682,7 @@ fn is_silent_cmd(cmd: &Cmd) -> bool {
 }
 
 pub fn run_cli() -> ExitCode {
+    fnr_fast::util::augment_toolchain_paths(setup::home().ok().as_deref());
     let cli = Cli::parse();
     let root = abs(&cli.dir);
     let silent = is_silent_cmd(&cli.cmd);
@@ -716,6 +741,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
         Cmd::Scan {
             cdb,
             duration,
+            load,
             json,
             command,
         } => {
@@ -733,9 +759,10 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                 command,
                 fnr_fast::pipeline::ScanOptions {
                     duration_secs: duration,
+                    load_command: load.clone(),
                 },
             )?;
-            let advice = synergy::advise_mode(&out);
+            let advice = synergy::advise_mode_with_context(&out, duration, load.as_deref());
             if json {
                 println!(
                     "{}",
@@ -827,6 +854,8 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             cdb,
             function,
             lang,
+            duration,
+            load,
             command,
         } => {
             let command = if let Some(cdb_path) = cdb {
@@ -852,6 +881,8 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                             strict,
                             float_tolerance,
                             min_speedup,
+                            duration_secs: duration,
+                            load_command: load.as_deref(),
                             print_progress: true,
                         },
                     )?;
@@ -1666,6 +1697,19 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                 print!("{}", clean::text(&out));
             }
         }
+        Cmd::Deploy {
+            target,
+            write,
+            force,
+            json,
+        } => {
+            let plan = synergy::generate_deploy_plan(root, target.as_deref(), write, force)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                print!("{}", synergy::format_deploy_plan(&plan));
+            }
+        }
         Cmd::Commands => {
             println!("{}", all_commands_text());
         }
@@ -1881,6 +1925,7 @@ Whole-App Pure Rust Rewrite (`fnr app ...`):
 
 Verification, CI & Packaging:
   fnr build [crate | --deploy]  Build unit crate or deploy-build `.fast/ports/*` in CI/Docker
+  fnr deploy [--write]          Generate ready-to-use Dockerfile.fnr & GitHub Actions CI workflow
   fnr gate [target]             Strict Definition-of-Done check (`fmt`, `clippy`, `test`, `unsafe`)
   fnr ci [target]               One-shot CI parity/gate/fuzz/speedup pipeline
   fnr package [target]          Package verified port into `dist/` (wheel / npm / native)
@@ -1955,6 +2000,9 @@ mod tests {
 
         let doc_all = Cli::try_parse_from(["fnr", "doctor", "--all"]).unwrap();
         assert!(matches!(doc_all.cmd, Cmd::Doctor { all: true, .. }));
+
+        let dep = Cli::try_parse_from(["fnr", "deploy", "--write"]).unwrap();
+        assert!(matches!(dep.cmd, Cmd::Deploy { write: true, .. }));
 
         let scan_dur =
             Cli::try_parse_from(["fnr", "scan", "--duration", "5", "--", "python", "app.py"])

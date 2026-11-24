@@ -239,13 +239,18 @@ pub fn profile_with_options(
         bail!("--duration must be at least 1 second");
     }
     let out = ctx.fast.join("profile.json");
-    helper(
+    let mut load_driver = crate::util::spawn_load_command(&ctx.root, opts.load_command.as_deref())?;
+    let res = helper(
         ctx,
         python,
         "profile",
         json!({ "root": ctx.root, "out": out, "max": 40, "duration": opts.duration_secs }),
         app_args,
-    )?;
+    );
+    if let Some(ref mut d) = load_driver {
+        d.finish();
+    }
+    res?;
     serde_json::from_str(&fs::read_to_string(&out)?).context("reading the profile")
 }
 
@@ -281,10 +286,17 @@ pub fn record(
         "self_fields": hs.self_fields,
         "out": out,
         "meta": meta,
-        "limit": limit
+        "limit": limit,
+        "duration": ctx.state.duration_secs
     });
+    let mut load_driver =
+        crate::util::spawn_load_command(&ctx.root, ctx.state.load_command.as_deref())?;
     if module != "__main__" {
-        helper(ctx, python, "record", job, app_args)?;
+        let res = helper(ctx, python, "record", job, app_args);
+        if let Some(ref mut d) = load_driver {
+            d.finish();
+        }
+        res?;
     } else {
         // The entry script can't be patched from outside: insert a wrapping line before its
         // if __name__ == "__main__" block for this run, then put the file back byte for byte.
@@ -319,6 +331,9 @@ pub fn record(
             ),
         )?;
         let run = helper(ctx, python, "record", job, app_args);
+        if let Some(ref mut d) = load_driver {
+            d.finish();
+        }
         fs::write(&file, &original).with_context(|| {
             format!("restoring {} (a copy is in {})", hs.file, backup.display())
         })?;
@@ -2244,6 +2259,7 @@ if __name__ == '__main__':
             &["server.py".to_string()],
             crate::backend::ProfileOptions {
                 duration_secs: Some(1),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -2269,6 +2285,7 @@ if __name__ == '__main__':
                 &["server.py".to_string()],
                 crate::backend::ProfileOptions {
                     duration_secs: Some(1),
+                    ..Default::default()
                 },
             )
             .unwrap();

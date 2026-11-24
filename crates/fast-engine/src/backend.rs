@@ -29,9 +29,10 @@ pub enum Lang {
     Kotlin,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ProfileOptions {
     pub duration_secs: Option<u64>,
+    pub load_command: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -59,7 +60,7 @@ fn wrapper_hint(program: &str) -> Option<&'static str> {
             "Node.js 22.6+ runs TypeScript itself, and fast-n-rust needs node to start the app:\n    fnr scan -- node app.ts"
         }
         "next" | "vite" | "webpack" | "nuxt" | "astro" => {
-            "Dev bundlers wrap your app in a build server. Profile your backend script or a CPU workload directly:\n    fnr scan -- node bench.ts  (or `fnr scan --duration 10 -- tsx server.ts`)"
+            "Dev bundlers wrap your app in a build server. Profile a short script calling the slow function (e.g. `fnr scan -- node .fast/bench_driver.ts`), or for HTTP servers run `fnr scan --duration 4 --load \"curl ...\" -- <server-cmd>`. For browser/Vercel code, escalate the port to WASM (`fnr escalate <id>` + `fnr bridge . <unit> --kind wasm`)."
         }
         "fastapi" => {
             "Run FastAPI via uvicorn or python directly so fnr can attach cProfile:\n    fnr scan --duration 10 -- uvicorn app:app"

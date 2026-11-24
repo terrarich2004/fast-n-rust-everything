@@ -67,7 +67,7 @@ pub fn get(name: &str, arguments: &Value) -> Result<Value, String> {
             (
                 "Speed up the slow 5% in Rust",
                 format!(
-                    "Optimize hot paths in `{path}` using the compact fast-n-rust MCP tools (`inspect(scan)` -> `scaffold(port)` -> edit Rust -> `check(verify, gate=true, fuzz_cases=50)` -> `switch(enable)` -> `measure(bench)`), or legacy tool names (`scan`, `port`, `verify`, `enable`, `bench`). Pass `duration` (seconds) to `scan` for HTTP servers/long-running apps. Check `advice.mode` and `advice.diagnosis` first: do not force Rust on `optimize_io_first`, extract pure helpers on `extract_pure_helper`, and relay any `deploy` readiness warnings after `enable`.\n\n\
+                    "Optimize hot paths in `{path}` using the compact fast-n-rust MCP tools (`inspect(scan)` -> `scaffold(port)` -> edit Rust -> `check(verify, gate=true, fuzz_cases=50)` -> `switch(enable)` -> `measure(bench)`), or legacy tool names (`scan`, `port`, `verify`, `enable`, `bench`). For web apps/bundlers/bots with no CLI benchmark, either write a temporary `.fast/bench_driver.{{py,ts}}` calling the hot function or pass `duration` + `load` to `scan` for HTTP servers. Check `advice.mode` and `advice.diagnosis` first: do not force Rust on `optimize_io_first`, re-run with `load` on `no_workload_exercised`, extract pure helpers on `extract_pure_helper`, run `tsc --noEmit`/tests after `enable`, and use `ship(action=\"deploy\")` (or WASM for browser/Edge) if deploying.\n\n\
                      {cmd_hint}\n\n{body}"
                 ),
             )

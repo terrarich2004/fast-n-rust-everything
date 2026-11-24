@@ -224,6 +224,7 @@ pub enum RecommendedMode {
     BatchHotLoop,
     OptimizeIoFirst,
     ExtractPureHelper,
+    NoWorkloadExercised,
     WholeApp,
 }
 
@@ -341,9 +342,19 @@ fn diagnose_bottlenecks(scan: &ScanOut, top_portable_share: f64) -> BottleneckDi
     }
 }
 
-/// Recommends the best strategy (`fast`, `--batch`, `extract_pure_helper`, `optimize_io_first`, or `whole_app`)
+/// Recommends the best strategy (`fast`, `--batch`, `extract_pure_helper`, `optimize_io_first`, `no_workload_exercised`, or `whole_app`)
 /// from a `scan` profile.
 pub fn advise_mode(scan: &ScanOut) -> ModeAdvice {
+    advise_mode_with_context(scan, None, None)
+}
+
+/// Same as `advise_mode`, with timed `--duration` / `--load` context so an idle server
+/// does not get told to rewrite the whole app in Rust.
+pub fn advise_mode_with_context(
+    scan: &ScanOut,
+    duration_secs: Option<u64>,
+    load_command: Option<&str>,
+) -> ModeAdvice {
     let portable: Vec<&Hotspot> = scan.hotspots.iter().filter(|h| h.worth_it()).collect();
     let top_share: f64 = portable
         .iter()
@@ -351,6 +362,20 @@ pub fn advise_mode(scan: &ScanOut) -> ModeAdvice {
         .fold(0.0_f64, f64::max)
         .min(1.0);
     let diagnosis = diagnose_bottlenecks(scan, top_share);
+
+    if scan.hotspots.is_empty() && (duration_secs.is_some() || load_command.is_some()) {
+        let cmd = scan.command.join(" ");
+        return ModeAdvice {
+            mode: RecommendedMode::NoWorkloadExercised,
+            headline: "No functions from your code executed during the timed scan — the server or bot likely sat idle waiting for incoming requests/events.".to_string(),
+            next_command: format!(
+                "fnr scan --duration 5 --load \"curl -s http://127.0.0.1:PORT/...\" -- {cmd}  (or profile a short script that calls your handler directly)"
+            ),
+            top_portable_share: top_share,
+            diagnosis,
+            next_mcp_action: None,
+        };
+    }
 
     if let Some(loop_hs) = portable.iter().find(|h| {
         h.ffi_budget_ratio() > 0.25
@@ -1497,6 +1522,8 @@ pub struct GoHotspotOptions<'a> {
     pub strict: bool,
     pub float_tolerance: Option<f64>,
     pub min_speedup: Option<f64>,
+    pub duration_secs: Option<u64>,
+    pub load_command: Option<&'a str>,
     pub print_progress: bool,
 }
 
@@ -1519,8 +1546,15 @@ pub struct GoHotspotOutcome {
 
 /// Unified end-to-end hotspot `go` pipeline shared by CLI and MCP.
 pub fn go_hotspot(root: &Path, opts: GoHotspotOptions<'_>) -> Result<GoHotspotOutcome> {
-    let scanned = pipeline::scan(root, opts.command)?;
-    let advice = advise_mode(&scanned);
+    let scanned = pipeline::scan_with_options(
+        root,
+        opts.command,
+        pipeline::ScanOptions {
+            duration_secs: opts.duration_secs,
+            load_command: opts.load_command.map(str::to_string),
+        },
+    )?;
+    let advice = advise_mode_with_context(&scanned, opts.duration_secs, opts.load_command);
     if opts.print_progress {
         fnr_fast::show::scan(&scanned);
         println!("\nMode Advisor: {}", advice.headline);
@@ -2732,6 +2766,212 @@ pub fn audit_deploy(root: &Path) -> DeployAudit {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeployArtifact {
+    pub path: String,
+    pub description: String,
+    pub content: String,
+    pub written: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeployPlan {
+    pub host_target: String,
+    pub app_stack: String,
+    pub warnings: Vec<String>,
+    pub artifacts: Vec<DeployArtifact>,
+}
+
+fn detect_deploy_stack(root: &Path) -> &'static str {
+    if root.join(".fast/state.json").is_file()
+        && let Ok(ctx) = Ctx::open(root)
+    {
+        return match ctx.state.lang {
+            FastLang::Python => "python",
+            FastLang::Node => "node",
+            FastLang::Go => "go",
+            FastLang::Java | FastLang::Kotlin => "jvm",
+            FastLang::C | FastLang::Cpp => "cfamily",
+            FastLang::CSharp => "dotnet",
+            FastLang::Ruby => "ruby",
+            FastLang::Php => "php",
+            FastLang::R => "r",
+        };
+    }
+    if root.join("pyproject.toml").is_file() || root.join("requirements.txt").is_file() {
+        "python"
+    } else if root.join("package.json").is_file() {
+        "node"
+    } else if root.join("go.mod").is_file() {
+        "go"
+    } else if root.join("Cargo.toml").is_file() {
+        "rust"
+    } else {
+        "generic"
+    }
+}
+
+fn render_deploy_dockerfile(stack: &str) -> String {
+    let (base_image, setup_deps, run_hint) = match stack {
+        "python" => (
+            "python:3.12-slim",
+            "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates build-essential && rm -rf /var/lib/apt/lists/*",
+            "RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi\nCMD [\"python3\", \"app.py\"]",
+        ),
+        "node" => (
+            "node:22-bookworm-slim",
+            "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates build-essential && rm -rf /var/lib/apt/lists/*",
+            "RUN if [ -f package-lock.json ]; then npm ci --omit=dev; elif [ -f package.json ]; then npm install --omit=dev; fi\nCMD [\"node\", \"app.js\"]",
+        ),
+        _ => (
+            "debian:bookworm-slim",
+            "apt-get update && apt-get install -y --no-install-recommends curl ca-certificates build-essential && rm -rf /var/lib/apt/lists/*",
+            "CMD [\"sh\"]",
+        ),
+    };
+    format!(
+        "# Generated by `fnr deploy` — builds `.fast/ports/` natively for this container and fails fast if missing.\n\
+         FROM {base_image}\n\
+         WORKDIR /app\n\n\
+         RUN {setup_deps}\n\
+         RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \\\n\
+             && curl -fsSL https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.sh | sh\n\
+         ENV PATH=\"/root/.local/bin:/root/.cargo/bin:${{PATH}}\"\n\n\
+         COPY . .\n\
+         RUN fnr build --deploy\n\
+         ENV FNR_STRICT=1\n\n\
+         {run_hint}\n"
+    )
+}
+
+fn render_deploy_workflow(stack: &str) -> String {
+    let runtime_step = match stack {
+        "python" => {
+            "      - uses: actions/setup-python@v5\n        with:\n          python-version: \"3.12\"\n"
+        }
+        "node" => {
+            "      - uses: actions/setup-node@v4\n        with:\n          node-version: \"22\"\n"
+        }
+        _ => "",
+    };
+    format!(
+        "# Generated by `fnr deploy` — verifies parity/gates and builds `.fast/lib/` artifacts per OS.\n\
+         name: fast-n-rust Deploy Build\n\n\
+         on:\n  push:\n    branches: [main, master]\n  pull_request:\n  workflow_dispatch:\n\n\
+         jobs:\n  build-ports:\n    strategy:\n      fail-fast: false\n      matrix:\n        os: [ubuntu-latest, macos-latest, windows-latest]\n    runs-on: ${{ matrix.os }}\n    steps:\n      - uses: actions/checkout@v4\n{runtime_step}      - uses: dtolnay/rust-toolchain@stable\n      - name: Install fast-n-rust\n        shell: bash\n        run: |\n          if [ \"$RUNNER_OS\" = \"Windows\" ]; then\n            pwsh -NoProfile -Command \"irm https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.ps1 | iex\"\n          else\n            curl -fsSL https://raw.githubusercontent.com/terrarich2004/fast-n-rust-everything/main/install.sh | sh\n          fi\n      - name: Verify parity & strict Rust gate\n        run: fnr ci\n      - name: Build deploy binaries (.fast/lib/)\n        run: fnr build --deploy\n      - uses: actions/upload-artifact@v4\n        with:\n          name: fnr-lib-${{ matrix.os }}\n          path: .fast/lib/\n          if-no-files-found: ignore\n"
+    )
+}
+
+/// Generate Docker and GitHub Actions deployment configs for `.fast/` and `rust/` ports.
+pub fn generate_deploy_plan(
+    root: &Path,
+    target: Option<&str>,
+    write: bool,
+    force: bool,
+) -> Result<DeployPlan> {
+    let audit = audit_deploy(root);
+    let stack = detect_deploy_stack(root).to_string();
+    let mut warnings = audit.warnings.clone();
+
+    let is_serverless = audit
+        .detected_targets
+        .iter()
+        .any(|t| t == "serverless/edge")
+        || root.join("wrangler.toml").is_file();
+    if is_serverless && stack == "node" && warnings.is_empty() {
+        warnings.push(
+            "Serverless/Edge platforms (Vercel, Next.js, Netlify, Cloudflare) generally cannot load local `.node` addons. For browser/Edge code, escalate to WASM (`fnr escalate <id>` + `fnr bridge . <unit> --kind wasm`) or deploy on a container/VPS.".to_string(),
+        );
+    }
+    if root.join("Dockerfile").is_file() {
+        warnings.push(
+            "Existing `Dockerfile` found — writing `Dockerfile.fnr` so your custom `Dockerfile` is untouched; merge `RUN fnr build --deploy` and `ENV FNR_STRICT=1` into it.".to_string(),
+        );
+    }
+
+    let mode = target.unwrap_or("all");
+    let mut artifacts = Vec::new();
+    match mode {
+        "all" => {
+            artifacts.push(DeployArtifact {
+                path: ".github/workflows/fnr-deploy.yml".to_string(),
+                description: "GitHub Actions workflow to verify `fnr ci` and build `.fast/lib/` on Linux/macOS/Windows".to_string(),
+                content: render_deploy_workflow(&stack),
+                written: false,
+            });
+            artifacts.push(DeployArtifact {
+                path: "Dockerfile.fnr".to_string(),
+                description: "Container recipe that builds `.fast/` ports during image build and enables `FNR_STRICT=1`".to_string(),
+                content: render_deploy_dockerfile(&stack),
+                written: false,
+            });
+        }
+        "github-actions" | "ci" => {
+            artifacts.push(DeployArtifact {
+                path: ".github/workflows/fnr-deploy.yml".to_string(),
+                description: "GitHub Actions workflow to verify `fnr ci` and build `.fast/lib/` on Linux/macOS/Windows".to_string(),
+                content: render_deploy_workflow(&stack),
+                written: false,
+            });
+        }
+        "docker" => {
+            artifacts.push(DeployArtifact {
+                path: "Dockerfile.fnr".to_string(),
+                description: "Container recipe that builds `.fast/` ports during image build and enables `FNR_STRICT=1`".to_string(),
+                content: render_deploy_dockerfile(&stack),
+                written: false,
+            });
+        }
+        other => {
+            anyhow::bail!(
+                "unknown deploy target `{other}`: expected `all`, `docker`, or `github-actions`"
+            );
+        }
+    }
+
+    if write {
+        for art in &mut artifacts {
+            let dst = root.join(&art.path);
+            if dst.exists() && !force {
+                anyhow::bail!("{} already exists (pass --force to overwrite)", art.path);
+            }
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&dst, &art.content)?;
+            art.written = true;
+        }
+    }
+
+    Ok(DeployPlan {
+        host_target: audit.host_target,
+        app_stack: stack,
+        warnings,
+        artifacts,
+    })
+}
+
+pub fn format_deploy_plan(plan: &DeployPlan) -> String {
+    let mut out = format!(
+        "Deploy Plan (stack: {}, host: {}):\n",
+        plan.app_stack, plan.host_target
+    );
+    for w in &plan.warnings {
+        out.push_str(&format!("  warning: {w}\n"));
+    }
+    for art in &plan.artifacts {
+        let status = if art.written { "wrote" } else { "preview" };
+        out.push_str(&format!(
+            "\n--- [{status}] {} ({}) ---\n{}",
+            art.path, art.description, art.content
+        ));
+    }
+    if plan.artifacts.iter().all(|a| !a.written) {
+        out.push_str("\nRun `fnr deploy --write` to write these files to disk.\n");
+    }
+    out
+}
+
 #[derive(Debug, Serialize)]
 pub struct UnifiedStatus {
     pub has_fast: bool,
@@ -2892,6 +3132,42 @@ mod tests {
         assert_eq!(guard_adv.mode, RecommendedMode::ExtractPureHelper);
         assert_eq!(guard_adv.diagnosis.hints[0].category, "entry_guard");
         assert!(guard_adv.next_command.contains("python3 app.py"));
+
+        let idle_server_scan = ScanOut {
+            command: vec!["python3".into(), "server.py".into()],
+            wall: 2.0,
+            hotspots: vec![],
+        };
+        let idle_adv = advise_mode_with_context(&idle_server_scan, Some(2), None);
+        assert_eq!(idle_adv.mode, RecommendedMode::NoWorkloadExercised);
+        assert!(idle_adv.next_command.contains("--load"));
+    }
+
+    #[test]
+    fn deploy_plan_detects_vercel_and_writes_artifacts() {
+        let dir = std::env::temp_dir().join(format!("fnr-deploy-plan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("package.json"), "{\"name\":\"web\"}\n").unwrap();
+        fs::write(dir.join("vercel.json"), "{}\n").unwrap();
+
+        let preview = generate_deploy_plan(&dir, None, false, false).unwrap();
+        assert_eq!(preview.app_stack, "node");
+        assert!(
+            preview.warnings.iter().any(|w| w.contains("WASM")),
+            "{:?}",
+            preview.warnings
+        );
+        assert!(preview.artifacts.iter().all(|a| !a.written));
+
+        let written = generate_deploy_plan(&dir, None, true, false).unwrap();
+        assert!(written.artifacts.iter().all(|a| a.written));
+        assert!(dir.join(".github/workflows/fnr-deploy.yml").is_file());
+        assert!(dir.join("Dockerfile.fnr").is_file());
+        assert!(generate_deploy_plan(&dir, None, true, false).is_err());
+        assert!(generate_deploy_plan(&dir, None, true, true).is_ok());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

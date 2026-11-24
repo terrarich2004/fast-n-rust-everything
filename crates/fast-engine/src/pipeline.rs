@@ -18,9 +18,10 @@ pub struct ScanOut {
     pub hotspots: Vec<Hotspot>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ScanOptions {
     pub duration_secs: Option<u64>,
+    pub load_command: Option<String>,
 }
 
 pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
@@ -69,13 +70,19 @@ pub fn scan_with_options(root: &Path, command: Vec<String>, opts: ScanOptions) -
     let lang = crate::cfamily::refine(Lang::detect(&command[0])?, &command[1..]);
     let lang = crate::kotlin::refine(lang, &command[0], &ctx.root);
     let exe = lang.resolve(&command[0], &ctx.root)?;
+    let effective_duration = match (opts.duration_secs, opts.load_command.as_ref()) {
+        (Some(d), _) => Some(d),
+        (None, Some(c)) if !c.trim().is_empty() => Some(4),
+        _ => None,
+    };
     ui::step(format!("profiling {}", ui::bold(command.join(" "))));
     let profile = lang.profile_with_options(
         &ctx,
         &exe,
         &command[1..],
         crate::backend::ProfileOptions {
-            duration_secs: opts.duration_secs,
+            duration_secs: effective_duration,
+            load_command: opts.load_command.clone(),
         },
     )?;
     let hotspots = hotspot::rank(profile.functions, profile.wall);
@@ -84,6 +91,8 @@ pub fn scan_with_options(root: &Path, command: Vec<String>, opts: ScanOptions) -
     ctx.state.runtime = Some(exe);
     ctx.state.base = profile.base;
     ctx.state.wall = profile.wall;
+    ctx.state.duration_secs = effective_duration;
+    ctx.state.load_command = opts.load_command.filter(|c| !c.trim().is_empty());
     ctx.state.hotspots = hotspots.clone();
     ctx.save()?;
     Ok(ScanOut {

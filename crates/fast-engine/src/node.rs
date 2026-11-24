@@ -8,6 +8,7 @@ use crate::state::{Ctx, Port, Verify};
 use crate::util::{combined, forward_slashes, output, relative, slug, tail};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -274,7 +275,7 @@ fn unwrap_pkg_manager(command: &[String], root: &Path) -> Result<Option<Vec<Stri
         "vite" | "next" | "webpack" | "nuxt" | "astro" | "react-scripts" | "remix" | "svelte-kit"
     ) {
         bail!(
-            "`{script_name}` runs a dev bundler (`{tool}`), which wraps your app in a build server. Profile your backend script or a CPU workload directly (e.g. `fnr scan -- node bench.ts` or `fnr scan --duration 10 -- tsx server.ts`)."
+            "`{script_name}` runs a dev bundler (`{tool}`), which wraps your app in a build server. Profile a short script calling the slow function directly (e.g. `fnr scan -- node .fast/bench_driver.ts`), or for HTTP servers run `fnr scan --duration 4 --load \"curl ...\" -- <server-cmd>`. For browser/Vercel code, escalate to WASM (`fnr escalate <id>` + `fnr bridge . <unit> --kind wasm`)."
         );
     }
     let mut tail = &command[extra_start..];
@@ -477,7 +478,12 @@ pub fn profile_with_options(
     if let Some(ms) = &duration_ms {
         cmd.env("FNR_PROFILE_DURATION_MS", ms);
     }
-    let out = output(&mut cmd, runtime.name())?;
+    let mut load_driver = crate::util::spawn_load_command(&ctx.root, opts.load_command.as_deref())?;
+    let out = output(&mut cmd, runtime.name());
+    if let Some(ref mut d) = load_driver {
+        d.finish();
+    }
+    let out = out?;
     ensure!(
         out.status.success(),
         "the app failed ({}):\n{}",
@@ -531,7 +537,9 @@ pub fn record(
     let wrap =
         format!("{f} = globalThis.__fastAnythingWrap ? globalThis.__fastAnythingWrap({f}) : {f};");
     let entry = hs.module.as_deref() == Some("__main__");
-    let reassignable = redeclare(&original, "const", "let", f).unwrap_or_else(|| original.clone());
+    let reassignable = redeclare(&original, "const", "let", f)
+        .or_else(|| redeclare_fn_as_let(&original, f))
+        .unwrap_or_else(|| original.clone());
     fs::write(
         &file,
         add_marked(&reassignable, &format!("recording {}", hs.id), &wrap, entry),
@@ -574,7 +582,17 @@ pub fn record(
     } else {
         cmd.env_remove("FAST_ANYTHING_SELF_FIELDS");
     }
+    if let Some(secs) = ctx.state.duration_secs {
+        cmd.env("FNR_RECORD_DURATION_MS", (secs * 1000).to_string());
+    } else {
+        cmd.env_remove("FNR_RECORD_DURATION_MS");
+    }
+    let mut load_driver =
+        crate::util::spawn_load_command(&ctx.root, ctx.state.load_command.as_deref())?;
     let run = output(&mut cmd, runtime.name());
+    if let Some(ref mut d) = load_driver {
+        d.finish();
+    }
     fs::write(&file, &original)
         .with_context(|| format!("restoring {} (a copy is in {})", hs.file, backup.display()))?;
     let _ = fs::remove_file(&backup);
@@ -623,6 +641,10 @@ const TYPED_ARRAYS: &[&str] = &[
 
 /// Rust type for a TypeScript annotation, if there's an obvious one.
 pub fn rust_type(annotation: &str) -> Option<String> {
+    rust_type_with_records(annotation, &BTreeSet::new())
+}
+
+fn rust_type_with_records(annotation: &str, records: &BTreeSet<String>) -> Option<String> {
     let a = annotation.split_whitespace().collect::<Vec<_>>().join(" ");
     let parts = split_union(&a);
     let solid: Vec<&String> = parts
@@ -631,7 +653,7 @@ pub fn rust_type(annotation: &str) -> Option<String> {
         .collect();
     if solid.len() < parts.len() {
         return match solid.as_slice() {
-            [one] => rust_type(one).map(|t| format!("Option<{t}>")),
+            [one] => rust_type_with_records(one, records).map(|t| format!("Option<{t}>")),
             _ => None,
         };
     }
@@ -639,6 +661,9 @@ pub fn rust_type(annotation: &str) -> Option<String> {
         return None;
     }
     let a = a.trim();
+    if records.contains(a) {
+        return Some(a.to_string());
+    }
     Some(match a {
         "number" => "f64".into(),
         "string" => "String".into(),
@@ -666,7 +691,7 @@ pub fn rust_type(annotation: &str) -> Option<String> {
                 .and_then(|x| x.strip_suffix(']'))
                 .map(|x| {
                     x.split(',')
-                        .map(|p| rust_type(p.trim()))
+                        .map(|p| rust_type_with_records(p.trim(), records))
                         .collect::<Option<Vec<String>>>()
                 });
             if let Some(Some(parts)) = tuple {
@@ -676,10 +701,11 @@ pub fn rust_type(annotation: &str) -> Option<String> {
                 }
                 format!("Vec<{}>", parts[0])
             } else if let Some(inner) = inner {
-                format!("Vec<{}>", rust_type(&inner)?)
+                format!("Vec<{}>", rust_type_with_records(&inner, records)?)
             } else if let Some(inner) = set_inner {
                 // napi converts a JS Set into a HashSet, whose items must hash: strings yes, f64 no
-                let inner = rust_type(inner.trim()).filter(|t| t == "String")?;
+                let inner =
+                    rust_type_with_records(inner.trim(), records).filter(|t| t == "String")?;
                 format!("std::collections::HashSet<{inner}>")
             } else {
                 // a JS Map would arrive empty (napi's HashMap reads a plain object's own keys), so
@@ -689,7 +715,7 @@ pub fn rust_type(annotation: &str) -> Option<String> {
                     .and_then(|x| x.strip_suffix('>'))?;
                 format!(
                     "std::collections::HashMap<String, {}>",
-                    rust_type(v.trim())?
+                    rust_type_with_records(v.trim(), records)?
                 )
             }
         }
@@ -720,15 +746,201 @@ fn snake(name: &str) -> String {
     }
 }
 
+fn contains_ident(text: &str, name: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(name) {
+        let at = start + pos;
+        let before_ok = at == 0 || !text[..at].chars().next_back().is_some_and(ident);
+        let after = at + name.len();
+        let after_ok = after == text.len() || !text[after..].chars().next().is_some_and(ident);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = at + name.len();
+    }
+    false
+}
+
+fn mentions_type(text: Option<&str>, name: &str) -> bool {
+    text.is_some_and(|t| contains_ident(t, name))
+}
+
+fn record_structs(hs: &Hotspot) -> (BTreeSet<String>, String) {
+    let mut active = BTreeSet::new();
+    for name in hs.records.keys() {
+        let used = hs
+            .params
+            .iter()
+            .any(|p| mentions_type(p.annotation.as_deref(), name))
+            || mentions_type(hs.returns.as_deref(), name);
+        if used {
+            active.insert(name.clone());
+        }
+    }
+    // Pull in transitively referenced record types.
+    loop {
+        let mut added = false;
+        let current: Vec<String> = active.iter().cloned().collect();
+        for name in current {
+            if let Some(fields) = hs.records.get(&name) {
+                for cand in hs.records.keys() {
+                    if !active.contains(cand)
+                        && fields
+                            .iter()
+                            .any(|f| mentions_type(f.annotation.as_deref(), cand))
+                    {
+                        active.insert(cand.clone());
+                        added = true;
+                    }
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    // Keep only structs whose every field resolves cleanly.
+    loop {
+        let before = active.len();
+        let snapshot = active.clone();
+        active.retain(|name| {
+            hs.records.get(name).is_some_and(|fields| {
+                !fields.is_empty()
+                    && fields.iter().all(|f| {
+                        f.annotation
+                            .as_deref()
+                            .and_then(|a| rust_type_with_records(a, &snapshot))
+                            .is_some()
+                    })
+            })
+        });
+        if active.len() == before {
+            break;
+        }
+    }
+    let mut defs = String::new();
+    for name in &active {
+        let Some(fields) = hs.records.get(name) else {
+            continue;
+        };
+        defs.push_str(&format!(
+            "#[napi(object)]\n#[derive(Clone, Debug)]\npub struct {name} {{\n"
+        ));
+        for f in fields {
+            let Some(ty) = f
+                .annotation
+                .as_deref()
+                .and_then(|a| rust_type_with_records(a, &active))
+            else {
+                continue;
+            };
+            let rs_field = snake(&f.name);
+            if rs_field != f.name {
+                defs.push_str(&format!("    #[napi(js_name = \"{}\")]\n", f.name));
+            }
+            defs.push_str(&format!("    pub {rs_field}: {ty},\n"));
+        }
+        defs.push_str("}\n\n");
+    }
+    (active, defs)
+}
+
+fn infer_recorded_type(values: &[&Value]) -> Option<String> {
+    let mut has_null_or_undef = false;
+    let mut concrete = Vec::new();
+    for v in values {
+        if v.is_null() || v.get("$undefined").is_some() {
+            has_null_or_undef = true;
+        } else {
+            concrete.push(*v);
+        }
+    }
+    if concrete.is_empty() {
+        return None;
+    }
+    let base = if concrete
+        .iter()
+        .all(|v| v.is_f64() || v.is_i64() || v.is_u64())
+    {
+        "f64".to_string()
+    } else if concrete.iter().all(|v| v.is_string()) {
+        "String".to_string()
+    } else if concrete.iter().all(|v| v.is_boolean()) {
+        "bool".to_string()
+    } else if concrete.iter().all(|v| v.is_array()) {
+        let elems: Vec<&Value> = concrete
+            .iter()
+            .filter_map(|v| v.as_array())
+            .flatten()
+            .collect();
+        if elems.is_empty() {
+            return None;
+        }
+        if elems.iter().all(|v| v.is_f64() || v.is_i64() || v.is_u64()) {
+            "Vec<f64>".to_string()
+        } else if elems.iter().all(|v| v.is_string()) {
+            "Vec<String>".to_string()
+        } else if elems.iter().all(|v| v.is_boolean()) {
+            "Vec<bool>".to_string()
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    Some(if has_null_or_undef {
+        format!("Option<{base}>")
+    } else {
+        base
+    })
+}
+
+fn infer_types_from_recordings(
+    recordings: Option<&Path>,
+    param_count: usize,
+) -> (Vec<Option<String>>, Option<String>) {
+    let Some(path) = recordings else {
+        return (vec![None; param_count], None);
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return (vec![None; param_count], None);
+    };
+    let cases: Vec<Value> = text
+        .lines()
+        .take(100)
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect();
+    let mut param_types = Vec::with_capacity(param_count);
+    for i in 0..param_count {
+        let vals: Vec<&Value> = cases
+            .iter()
+            .filter_map(|c| c.get("args")?.as_array()?.get(i))
+            .collect();
+        param_types.push(infer_recorded_type(&vals));
+    }
+    let ret_vals: Vec<&Value> = cases.iter().filter_map(|c| c.get("result")).collect();
+    (param_types, infer_recorded_type(&ret_vals))
+}
+
 pub fn lib_rs(hs: &Hotspot, port: &Port) -> String {
+    lib_rs_with_recordings(hs, port, None)
+}
+
+fn lib_rs_with_recordings(hs: &Hotspot, port: &Port, recordings: Option<&Path>) -> String {
+    let (records, struct_defs) = record_structs(hs);
+    let (inferred_params, inferred_ret) = infer_types_from_recordings(recordings, hs.params.len());
     let params: Vec<String> = hs
         .params
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let ty = p
                 .annotation
                 .as_deref()
-                .and_then(rust_type)
+                .and_then(|a| rust_type_with_records(a, &records))
+                .or_else(|| inferred_params.get(i).cloned().flatten())
                 .unwrap_or_else(|| "serde_json::Value".into());
             format!("{}: {ty}", snake(&p.name))
         })
@@ -736,7 +948,8 @@ pub fn lib_rs(hs: &Hotspot, port: &Port) -> String {
     let ret = hs
         .returns
         .as_deref()
-        .and_then(rust_type)
+        .and_then(|a| rust_type_with_records(a, &records))
+        .or(inferred_ret)
         .unwrap_or_else(|| "serde_json::Value".into());
     format!(
         "//! Rust port of {id} ({file}:{line}), generated by fast-n-rust.\n\
@@ -744,6 +957,7 @@ pub fn lib_rs(hs: &Hotspot, port: &Port) -> String {
          //! Check it with:  fnr verify {id}\n\n\
          use napi::bindgen_prelude::*;\n\
          use napi_derive::napi;\n\n\
+         {struct_defs}\
          #[napi(js_name = \"{js}\", catch_unwind)]\n\
          #[allow(unused_variables)]\n\
          pub fn {rust}({params}) -> Result<{ret}> {{\n    todo!(\"port {id}\")\n}}\n",
@@ -921,7 +1135,8 @@ pub fn scaffold(ctx: &Ctx, hs: &Hotspot, helpers: &[Hotspot], port: &Port) -> Re
     fs::write(dir.join(".cargo/config.toml"), backend::CARGO_CONFIG)?;
     let lib = dir.join("src/lib.rs");
     if !lib.exists() {
-        fs::write(&lib, lib_rs(hs, port))?;
+        let rec_path = dir.join("recordings.jsonl");
+        fs::write(&lib, lib_rs_with_recordings(hs, port, Some(&rec_path)))?;
     }
     let task = task_md(hs, helpers, port, &dir);
     fs::write(dir.join("TASK.md"), &task)?;
@@ -1067,6 +1282,13 @@ fn target(name: &str, owner: Option<&str>, instance_method: bool) -> String {
     }
 }
 
+fn is_ts_file(path: &str) -> bool {
+    matches!(
+        Path::new(path).extension().and_then(|e| e.to_str()),
+        Some("ts" | "mts" | "cts" | "tsx")
+    )
+}
+
 pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
     let addon_name = addon_rel.rsplit('/').next().unwrap_or(addon_rel);
     let target_expr = target(&port.func, port.owner.as_deref(), port.instance_method);
@@ -1103,21 +1325,26 @@ pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
         } else {
             format!("{}, ..._args", field_args.join(", "))
         };
+        let fn_sig = if is_ts_file(&port.file) {
+            "function (this: any, ..._args: any[])"
+        } else {
+            "function (..._args)"
+        };
         vec![
             format!(
-                "    const _fnrFn = process.env.FNR_LIB_DIR ? {load_override} : {load_default};"
+                "      const _fnrFn = process.env.FNR_LIB_DIR ? {load_override} : {load_default};"
             ),
-            format!("    {target_expr} = function (..._args) {{"),
-            format!("      return _fnrFn({call_args});"),
-            "    };".to_string(),
+            format!("      {target_expr} = {fn_sig} {{"),
+            format!("        return _fnrFn({call_args});"),
+            "      };".to_string(),
         ]
     } else {
         vec![
-            "    if (process.env.FNR_LIB_DIR) {".to_string(),
-            format!("      {target_expr} = {load_override};"),
-            "    } else {".to_string(),
-            format!("      {target_expr} = {load_default};"),
-            "    }".to_string(),
+            "      if (process.env.FNR_LIB_DIR) {".to_string(),
+            format!("        {target_expr} = {load_override};"),
+            "      } else {".to_string(),
+            format!("        {target_expr} = {load_default};"),
+            "      }".to_string(),
         ]
     };
     let mut lines = vec![
@@ -1133,17 +1360,21 @@ pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
         ));
     }
     lines.extend([
-        "if (!((v) => v && v !== \"0\" && v.toLowerCase() !== \"false\")(process.env.FNR_DISABLE) && !((v) => v && v !== \"0\" && v.toLowerCase() !== \"false\")(process.env.FAST_ANYTHING_DISABLE)) {".to_string(),
-        "  try {".to_string(),
+        "{".to_string(),
+        "  const _fnrDis = String(process.env.FNR_DISABLE || process.env.FAST_ANYTHING_DISABLE || \"\").trim().toLowerCase();".to_string(),
+        "  if (!_fnrDis || _fnrDis === \"0\" || _fnrDis === \"false\") {".to_string(),
+        "    try {".to_string(),
     ]);
     lines.extend(assign_lines);
     lines.extend([
-        "  } catch (_err) {".to_string(),
-        "    if (process.env.FNR_STRICT === \"1\" || process.env.FNR_STRICT === \"true\") {".to_string(),
+        "    } catch (_err) {".to_string(),
+        "      if (process.env.FNR_STRICT === \"1\" || process.env.FNR_STRICT === \"true\") {".to_string(),
+        "        const _fnrMsg = _err instanceof Error ? _err.message : String(_err);".to_string(),
         format!(
-            "      throw new Error(\"fnr: FNR_STRICT=1 and Rust port {} ({addon_name}) could not be loaded: \" + (_err && _err.message || _err));",
+            "        throw new Error(\"fnr: FNR_STRICT=1 and Rust port {} ({addon_name}) could not be loaded: \" + _fnrMsg);",
             port.id
         ),
+        "      }".to_string(),
         "    }".to_string(),
         "  }".to_string(),
         "}".to_string(),
@@ -1223,33 +1454,101 @@ fn let_note(name: &str) -> String {
     format!("// fnr declared {name} with let instead of const above; disable puts the const back.")
 }
 
+fn expr_note(name: &str) -> String {
+    format!(
+        "// fnr declared {name} with let function expression above; disable puts function back."
+    )
+}
+
+/// Switch `[export] function <name>` to `[export] let <name> = function <name>` when `<name>`
+/// is not referenced before its declaration, so strict TypeScript accepts reassigning it.
+fn redeclare_fn_as_let(text: &str, name: &str) -> Option<String> {
+    let at = declaration(text, "function", name)?;
+    if contains_ident(&text[..at], name) {
+        return None;
+    }
+    Some(format!(
+        "{}let {name} = function{}",
+        &text[..at],
+        &text[at + "function".len()..]
+    ))
+}
+
+fn restore_fn_from_let(text: &str, name: &str) -> Option<String> {
+    let at = declaration(text, "let", name)?;
+    let prefix = format!("let {name} = function");
+    if text[at..].starts_with(&prefix) {
+        Some(format!(
+            "{}function{}",
+            &text[..at],
+            &text[at + prefix.len()..]
+        ))
+    } else {
+        None
+    }
+}
+
+fn annotate_ts_ignore(block: &str, target_expr: &str) -> String {
+    let needle = format!("{target_expr} =");
+    block
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with(&needle) {
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                format!("{indent}// @ts-ignore — reassign hoisted function declaration\n{line}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn with_shim(text: &str, port: &Port, block: &str) -> String {
     let note = let_note(&port.func);
+    let fnote = expr_note(&port.func);
     let legacy_note = format!(
         "// fast-anything declared {} with let instead of const above; disable puts the const back.",
         port.func
     );
-    let (text, swapped) =
-        match redeclare(text, "const", "let", &port.func).filter(|_| port.owner.is_none()) {
-            Some(t) => (t, true),
-            None => (
-                text.to_string(),
-                text.contains(&note) || text.contains(&legacy_note),
-            ), // already swapped by an earlier enable
-        };
-    let block = if swapped {
-        format!("{block}\n{note}")
+    let mut notes: Vec<String> = Vec::new();
+    let (text, block_owned) = if port.owner.is_none() {
+        if let Some(t) = redeclare(text, "const", "let", &port.func) {
+            notes.push(note);
+            (t, block.to_string())
+        } else if text.contains(&note) || text.contains(&legacy_note) {
+            notes.push(note);
+            (text.to_string(), block.to_string())
+        } else if let Some(t) = redeclare_fn_as_let(text, &port.func) {
+            notes.push(fnote);
+            (t, block.to_string())
+        } else if text.contains(&fnote) {
+            notes.push(fnote);
+            (text.to_string(), block.to_string())
+        } else if is_ts_file(&port.file) && declaration(text, "function", &port.func).is_some() {
+            (text.to_string(), annotate_ts_ignore(block, &port.func))
+        } else {
+            (text.to_string(), block.to_string())
+        }
     } else {
-        block.to_string()
+        (text.to_string(), block.to_string())
+    };
+    let block = if notes.is_empty() {
+        block_owned
+    } else {
+        format!("{block_owned}\n{}", notes.join("\n"))
     };
     add_marked(&text, &port.id, &block, port.module == "__main__")
 }
 
 fn without_shim(text: &str, port: &Port) -> String {
     let swapped = text.contains(&let_note(&port.func));
+    let swapped_fn = text.contains(&expr_note(&port.func));
     let text = backend::strip_marked(text, "//", &port.id);
     if swapped {
         redeclare(&text, "let", "const", &port.func).unwrap_or(text)
+    } else if swapped_fn {
+        restore_fn_from_let(&text, &port.func).unwrap_or(text)
     } else {
         text
     }
@@ -1576,7 +1875,84 @@ mod tests {
         assert!(esm.contains("_fnr_res_fa_fuzzy_levenshtein(process.env.FNR_LIB_DIR,"));
         let cjs = shim(&port, "./x.node", false);
         assert!(cjs.contains("require(\"node:path\").resolve(process.env.FNR_LIB_DIR,"));
-        assert!(cjs.contains("v !== \"0\" && v.toLowerCase() !== \"false\""));
+        assert!(cjs.contains("_fnrDis === \"0\" || _fnrDis === \"false\""));
+        assert!(!cjs.contains("(v) =>"));
+        assert!(cjs.contains("_err instanceof Error ? _err.message : String(_err)"));
+    }
+
+    #[test]
+    fn strict_ts_function_and_interface_codegen() {
+        let mut records = std::collections::BTreeMap::new();
+        records.insert(
+            "User".to_string(),
+            vec![
+                crate::hotspot::Param {
+                    name: "name".into(),
+                    annotation: Some("string".into()),
+                    default: None,
+                    kwonly: false,
+                },
+                crate::hotspot::Param {
+                    name: "age".into(),
+                    annotation: Some("number | undefined".into()),
+                    default: None,
+                    kwonly: false,
+                },
+            ],
+        );
+        let hs = Hotspot {
+            id: "fuzzy.rankUsers".into(),
+            file: "fuzzy.ts".into(),
+            line: 2,
+            name: "rankUsers".into(),
+            params: vec![
+                crate::hotspot::Param {
+                    name: "users".into(),
+                    annotation: Some("User[]".into()),
+                    default: None,
+                    kwonly: false,
+                },
+                crate::hotspot::Param {
+                    name: "minLen".into(),
+                    annotation: Some("number | undefined".into()),
+                    default: Some("3".into()),
+                    kwonly: false,
+                },
+            ],
+            returns: Some("number".into()),
+            records,
+            ..Default::default()
+        };
+        let port = Port {
+            id: "fuzzy.rankUsers".into(),
+            file: "fuzzy.ts".into(),
+            module: "fuzzy".into(),
+            func: "rankUsers".into(),
+            ext: "fa_fuzzy_rankusers".into(),
+            crate_dir: ".fast/ports/fuzzy.rankUsers".into(),
+            lang: backend::Lang::Node,
+            ..Default::default()
+        };
+        let rs = lib_rs(&hs, &port);
+        assert!(rs.contains("#[napi(object)]"), "{rs}");
+        assert!(rs.contains("pub struct User"), "{rs}");
+        assert!(rs.contains("pub age: Option<f64>"), "{rs}");
+        assert!(
+            rs.contains("pub fn rank_users(users: Vec<User>, min_len: Option<f64>) -> Result<f64>"),
+            "{rs}"
+        );
+
+        let ts_src = "export interface User { name: string; age?: number; }\nexport function rankUsers(users: User[], minLen = 3): number {\n  return users.length + minLen;\n}\n";
+        let block = shim(&port, "./.fast/lib/fa_fuzzy_rankusers.node", true);
+        let on = with_shim(ts_src, &port, &block);
+        assert!(
+            on.contains("export let rankUsers = function rankUsers"),
+            "{on}"
+        );
+        assert!(!on.contains("(v) =>"), "{on}");
+        assert!(on.contains("_err instanceof Error"), "{on}");
+        assert_eq!(with_shim(&on, &port, &block), on);
+        assert_eq!(without_shim(&on, &port), ts_src);
     }
 
     #[test]
@@ -1714,6 +2090,7 @@ setTimeout(() => { clearInterval(timer); }, 30000);
             &["server.mjs".to_string()],
             crate::backend::ProfileOptions {
                 duration_secs: Some(1),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1740,6 +2117,7 @@ setTimeout(() => { clearInterval(timer); }, 30000);
                 &["server.mjs".to_string()],
                 crate::backend::ProfileOptions {
                     duration_secs: Some(1),
+                    ..Default::default()
                 },
             )
             .unwrap();

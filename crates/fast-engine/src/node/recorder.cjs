@@ -5,12 +5,21 @@ const fs = require("node:fs");
 const out = process.env.FAST_ANYTHING_RECORD_OUT;
 const meta = process.env.FAST_ANYTHING_RECORD_META;
 const limit = Number(process.env.FAST_ANYTHING_RECORD_LIMIT || 500);
+const durationMs = Number(process.env.FNR_RECORD_DURATION_MS || 0);
 const selfFields = process.env.FAST_ANYTHING_SELF_FIELDS ? JSON.parse(process.env.FAST_ANYTHING_SELF_FIELDS) : null;
 const kept = [];
 const unsupported = new Set();
 let mutates = false;
 let calls = 0;
 let skipped = 0;
+let exiting = false;
+if (durationMs > 0) {
+  const _stopTimer = setTimeout(() => {
+    process.exitCode = 0;
+    process.exit(0);
+  }, durationMs);
+  if (_stopTimer && typeof _stopTimer.unref === "function") _stopTimer.unref();
+}
 let seed = 0xfa57;
 const rand = (n) => {
   seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
@@ -74,6 +83,13 @@ globalThis.__fastAnythingWrap = (fn) =>
         skipped++;
         unsupported.add(e.message);
       }
+    }
+    if (durationMs > 0 && kept.length >= limit && !exiting) {
+      exiting = true;
+      setImmediate(() => {
+        process.exitCode = 0;
+        process.exit(0);
+      });
     }
     return result;
   };

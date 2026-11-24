@@ -16,7 +16,7 @@ if (-not $Version) {
     }
   }
 }
-if (-not $Version) { $Version = "v0.2.2" }
+if (-not $Version) { $Version = "v0.2.3" }
 
 $Target = "x86_64-pc-windows-msvc"
 $Asset = "fast-n-rust-$Version-$Target.zip"
@@ -70,9 +70,30 @@ try {
   }
 
   Write-Host "Installed fast-n-rust.exe and fnr.exe to $InstallDir"
-  if ($env:PATH -notlike "*$InstallDir*") {
-    Write-Host "Add $InstallDir to your PATH to run 'fnr' from anywhere."
+  if ($env:FNR_NO_MODIFY_PATH -ne "1") {
+    $NormalizedInstall = $InstallDir.TrimEnd('\')
+    $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $Parts = @()
+    if ($UserPath) {
+      $Parts = $UserPath -split ";" | Where-Object { $_ -and $_.Trim() -ne "" }
+    }
+    $HasUserPath = $Parts | Where-Object { $_.Trim().TrimEnd('\') -ieq $NormalizedInstall }
+    if (-not $HasUserPath) {
+      $NewUserPath = if ($UserPath -and $UserPath.Trim() -ne "") {
+        "$($UserPath.TrimEnd(';'));$InstallDir"
+      } else {
+        $InstallDir
+      }
+      [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+      Write-Host "Added $InstallDir to your User PATH (new terminals will pick it up automatically)."
+    }
   }
+  $SessionParts = ($env:PATH -split ";") | Where-Object { $_ -and $_.Trim() -ne "" }
+  if (-not ($SessionParts | Where-Object { $_.Trim().TrimEnd('\') -ieq $InstallDir.TrimEnd('\') })) {
+    $env:PATH = "$InstallDir;$env:PATH"
+  }
+  & $AliasExe --version
+  Write-Host "Next step: run 'fnr setup' then 'fnr doctor'"
 } finally {
   Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue
 }

@@ -90,8 +90,12 @@ function parseParams(text) {
   return splitTop(text).map((p) => {
     let name = p;
     let annotation = null;
+    let defaultVal = null;
     const eq = defaultAt(p);
-    if (eq >= 0) name = p.slice(0, eq).trim();
+    if (eq >= 0) {
+      defaultVal = p.slice(eq + 1).trim();
+      name = p.slice(0, eq).trim();
+    }
     const rest = name.startsWith("...");
     if (rest) name = name.slice(3);
     const colon = name.indexOf(":");
@@ -101,9 +105,51 @@ function parseParams(text) {
     }
     const optional = name.endsWith("?") || eq >= 0;
     name = name.replace(/\?$/, "").trim();
-    if (optional && annotation) annotation += " | undefined";
-    return { name, annotation, rest, destructured: /^[[{]/.test(name) };
+    if (!annotation && defaultVal !== null) {
+      if (/^-?\d+(?:\.\d+)?$/.test(defaultVal)) annotation = "number";
+      else if (defaultVal === "true" || defaultVal === "false") annotation = "boolean";
+      else if (/^(?:'[^']*'|"[^"]*"|`[^`]*`)$/.test(defaultVal)) annotation = "string";
+    }
+    if (optional && annotation && !/\bundefined\b/.test(annotation)) {
+      annotation += " | undefined";
+    }
+    return { name, annotation, default: defaultVal, rest, destructured: /^[[{]/.test(name) };
   });
+}
+
+function extractRecords(src, code) {
+  const records = {};
+  const re = new RegExp(
+    "^(?:export\\s+)?(?:interface\\s+(" + IDENT + ")|type\\s+(" + IDENT + ")\\s*=)\\s*\\{",
+    "gm",
+  );
+  for (const m of code.matchAll(re)) {
+    const recName = m[1] || m[2];
+    const open = m.index + m[0].length - 1;
+    const close = matching(code, open);
+    if (close < 0) continue;
+    const body = src.slice(open + 1, close);
+    const fields = [];
+    let ok = true;
+    for (const rawLine of body.split(/[\n;]/)) {
+      const part = rawLine.trim().replace(/,$/, "").trim();
+      if (!part) continue;
+      if (/^\[/.test(part) || /\([^)]*\)\s*:/.test(part)) {
+        ok = false;
+        break;
+      }
+      const fm = part.match(new RegExp("^(?:readonly\\s+)?(" + IDENT + ")(\\?)?\\s*:\\s*(.+)$"));
+      if (!fm) {
+        ok = false;
+        break;
+      }
+      let ty = fm[3].trim();
+      if (fm[2] && !/\bundefined\b/.test(ty)) ty += " | undefined";
+      fields.push({ name: fm[1], annotation: ty });
+    }
+    if (ok && fields.length > 0) records[recName] = fields;
+  }
+  return records;
 }
 
 function topLevelFunctions(src) {
@@ -121,14 +167,15 @@ function describe(file, line0, name, entry, root) {
   if (!parsed.has(file)) {
     try {
       const src = readFileSync(file, "utf8");
-      parsed.set(file, { src, code: codeOnly(src), top: topLevelFunctions(src) });
+      const code = codeOnly(src);
+      parsed.set(file, { src, code, top: topLevelFunctions(src), records: extractRecords(src, code) });
     } catch {
       parsed.set(file, null);
     }
   }
   const f = parsed.get(file);
   if (!f) return null;
-  const { src, code, top } = f;
+  const { src, code, top, records } = f;
   const lines = code.split("\n");
   const n = esc(name);
   const patterns = [
@@ -266,12 +313,13 @@ function describe(file, line0, name, entry, root) {
     self_fields: selfFields,
     kind: kind === "method" || indent > 0 ? "method" : "function",
     end_line: src.slice(0, bodyEnd + 1).split("\n").length,
-    params: params.map(({ name, annotation }) => ({ name, annotation })),
+    params: params.map(({ name, annotation, default: def }) => ({ name, annotation, default: def })),
     returns,
     blockers,
     warnings,
     portability: blockers.length ? 0 : factor,
     calls: helpers,
+    records,
     source: src.slice(lineStart, bodyEnd + 1),
   };
 }
