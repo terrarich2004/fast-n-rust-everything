@@ -48,6 +48,10 @@ pub struct Port {
     pub lang: Lang,
     #[serde(default)]
     pub owner: Option<String>,
+    #[serde(default)]
+    pub instance_method: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub self_fields: Vec<String>,
     /// Where the function started when it was ported (to find it again among overloads).
     #[serde(default)]
     pub line: u32,

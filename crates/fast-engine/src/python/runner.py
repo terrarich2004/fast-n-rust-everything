@@ -270,21 +270,26 @@ def parse_file(path):
             return None
         by_line, top = {}, set()
 
-        def walk(node, prefix, kind):
+        def walk(node, prefix, kind, cls_node=None):
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     qual = prefix + child.name
                     for line in [child.lineno] + [d.lineno for d in child.decorator_list]:
-                        by_line[line] = (child, qual, kind)
+                        by_line[line] = (child, qual, kind, cls_node if kind == "method" else None)
                     if kind == "function":
                         top.add(child.name)
-                    walk(child, qual + ".<locals>.", "nested")
+                    walk(child, qual + ".<locals>.", "nested", None)
                 elif isinstance(child, ast.ClassDef):
-                    walk(child, prefix + child.name + ".", "method" if kind == "function" else "nested")
+                    walk(
+                        child,
+                        prefix + child.name + ".",
+                        "method" if kind == "function" else "nested",
+                        child if kind == "function" else None,
+                    )
                 else:
-                    walk(child, prefix, kind)
+                    walk(child, prefix, kind, cls_node)
 
-        walk(tree, "", "function")
+        walk(tree, "", "function", None)
         guard = next((n.lineno for n in tree.body if isinstance(n, ast.If) and is_main_guard(n.test)), None)
         records = {n.name: record_class_fields(n) for n in tree.body
                    if isinstance(n, ast.ClassDef) and is_record_class(n)}
@@ -544,6 +549,44 @@ def module_name(path, entry, base):
     return ".".join(parts)
 
 
+def _class_field_types(cls_node):
+    """Best-effort field type map from class body annotations and __init__ assignments."""
+    types = {}
+    if cls_node is None:
+        return types
+    for stmt in cls_node.body:
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            ann = ast.unparse(stmt.annotation)
+            if "ClassVar" not in ann:
+                types[stmt.target.id] = ann
+        elif isinstance(stmt, ast.FunctionDef) and stmt.name == "__init__" and stmt.args.args:
+            self_name = stmt.args.args[0].arg
+            p_types = {
+                a.arg: ast.unparse(a.annotation)
+                for a in stmt.args.posonlyargs + stmt.args.args[1:] + stmt.args.kwonlyargs
+                if a.annotation is not None
+            }
+            for sub in ast.walk(stmt):
+                if (
+                    isinstance(sub, ast.AnnAssign)
+                    and isinstance(sub.target, ast.Attribute)
+                    and isinstance(sub.target.value, ast.Name)
+                    and sub.target.value.id == self_name
+                ):
+                    types.setdefault(sub.target.attr, ast.unparse(sub.annotation))
+                elif (
+                    isinstance(sub, ast.Assign)
+                    and len(sub.targets) == 1
+                    and isinstance(sub.targets[0], ast.Attribute)
+                    and isinstance(sub.targets[0].value, ast.Name)
+                    and sub.targets[0].value.id == self_name
+                    and isinstance(sub.value, ast.Name)
+                    and sub.value.id in p_types
+                ):
+                    types.setdefault(sub.targets[0].attr, p_types[sub.value.id])
+    return types
+
+
 def describe(path, line, name, entry, base):
     parsed = parse_file(path)
     if parsed is None:
@@ -552,7 +595,7 @@ def describe(path, line, name, entry, base):
     hit = by_line.get(line)
     if hit is None or hit[0].name != name:
         return None
-    node, qualname, kind = hit
+    node, qualname, kind, cls_node = hit
     module = module_name(path, entry, base)
 
     blockers, warnings, factor = [], [], 1.0
@@ -563,10 +606,21 @@ def describe(path, line, name, entry, base):
     elif module == "__main__" and node.lineno > guard:
         blockers.append("defined inside the if __name__ == '__main__' block")
     owner = None
-    if kind == "method" and any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list):
+    instance_method = False
+    is_static = kind == "method" and any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in node.decorator_list)
+    is_cls_method = kind == "method" and any(isinstance(d, ast.Name) and d.id == "classmethod" for d in node.decorator_list)
+    if is_static:
         owner = qualname.rsplit(".", 1)[0]
+    elif is_cls_method:
+        blockers.append("@classmethod (use @staticmethod or instance method)")
     elif kind == "method":
-        blockers.append("method (module-level functions and @staticmethods only for now)")
+        if cls_node is None:
+            blockers.append("method on nested class")
+        elif not (node.args.posonlyargs or node.args.args):
+            blockers.append("method missing self parameter")
+        else:
+            owner = cls_node.name
+            instance_method = True
     elif kind == "nested":
         blockers.append("nested function")
     if isinstance(node, ast.AsyncFunctionDef):
@@ -635,11 +689,52 @@ def describe(path, line, name, entry, base):
     if helpers:
         warnings.append("calls " + ", ".join(sorted(helpers)[:3]) + ", they get ported together with it")
 
+    self_fields = []
+    if instance_method:
+        self_name = (args.posonlyargs + args.args)[0].arg
+        self_reads = set()
+        valid_self_nodes = set()
+        mutates_self = calls_self_method = uses_super = False
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "super":
+                uses_super = True
+            elif isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name) and sub.value.id == self_name:
+                if not isinstance(sub.ctx, ast.Load):
+                    mutates_self = True
+                elif id(sub) in called:
+                    calls_self_method = True
+                else:
+                    self_reads.add(sub.attr)
+                    valid_self_nodes.add(id(sub.value))
+        passes_self = any(
+            isinstance(sub, ast.Name) and sub.id == self_name and id(sub) not in valid_self_nodes
+            for sub in ast.walk(node)
+        )
+        if uses_super:
+            blockers.append("uses super()")
+        if mutates_self:
+            blockers.append("mutates self")
+        if calls_self_method:
+            blockers.append("calls methods on self")
+        if passes_self:
+            blockers.append("passes self as an object")
+        self_fields = sorted(self_reads)
+
     positional = args.posonlyargs + args.args
     defaults = [None] * (len(positional) - len(args.defaults)) + list(args.defaults)
-    params = [{"name": a.arg, "annotation": ast.unparse(a.annotation) if a.annotation else None,
-               "default": ast.unparse(d) if d is not None else None}
-              for a, d in zip(positional, defaults)]
+    if instance_method:
+        field_types = _class_field_types(cls_node)
+        params = [
+            {"name": f"self_{f}", "annotation": field_types.get(f), "default": None}
+            for f in self_fields
+        ]
+        rest_pos, rest_defs = positional[1:], defaults[1:]
+    else:
+        params = []
+        rest_pos, rest_defs = positional, defaults
+    params += [{"name": a.arg, "annotation": ast.unparse(a.annotation) if a.annotation else None,
+                "default": ast.unparse(d) if d is not None else None}
+               for a, d in zip(rest_pos, rest_defs)]
     params += [{"name": a.arg, "annotation": ast.unparse(a.annotation) if a.annotation else None,
                 "default": ast.unparse(d) if d is not None else None, "kwonly": True}
                for a, d in zip(args.kwonlyargs, args.kw_defaults)]
@@ -661,6 +756,8 @@ def describe(path, line, name, entry, base):
         "module": module,
         "kind": kind,
         "owner": owner,
+        "instance_method": instance_method,
+        "self_fields": self_fields,
         "end_line": node.end_lineno,
         "params": params,
         "returns": returns,
@@ -739,8 +836,10 @@ def cmd_profile(job, argv):
 class Recorder:
     """Keeps a uniform sample of up to `limit` calls to the wrapped function (reservoir sampling)."""
 
-    def __init__(self, limit, seed):
+    def __init__(self, limit, seed, instance_method=False, self_fields=()):
         self.limit, self.rng = limit, random.Random(seed)
+        self.instance_method = bool(instance_method)
+        self.self_fields = list(self_fields or ())
         self.reset()
 
     def reset(self):
@@ -752,6 +851,12 @@ class Recorder:
         else:
             self.kept[slot % self.limit] = case
 
+    def _flat_args(self, args):
+        if self.instance_method:
+            self_obj = args[0]
+            return [getattr(self_obj, f) for f in self.self_fields] + list(args[1:])
+        return list(args)
+
     def wrap(self, original):
         @functools.wraps(original)
         def recorder(*args, **kwargs):
@@ -760,7 +865,7 @@ class Recorder:
             case = None
             if slot < self.limit:
                 try:  # encode before the call, in case the function mutates its arguments
-                    case = {"args": enc(list(args)), "kwargs": {k: enc(v) for k, v in kwargs.items()}}
+                    case = {"args": enc(self._flat_args(args)), "kwargs": {k: enc(v) for k, v in kwargs.items()}}
                 except Unsupported as e:
                     self.skipped += 1
                     self.unsupported.add(str(e))
@@ -773,7 +878,7 @@ class Recorder:
                 raise
             if case is not None:
                 try:
-                    if enc(list(args)) != case["args"] or {k: enc(v) for k, v in kwargs.items()} != case["kwargs"]:
+                    if enc(self._flat_args(args)) != case["args"] or {k: enc(v) for k, v in kwargs.items()} != case["kwargs"]:
                         self.mutates = True
                 except Unsupported:
                     pass
@@ -803,7 +908,10 @@ class Recorder:
         original = getattr(owner, job["func"])
         if not hasattr(original, "__wrapped__"):
             wrapped = self.wrap(original)
-            setattr(owner, job["func"], staticmethod(wrapped) if job.get("owner") else wrapped)
+            if job.get("owner") and not self.instance_method:
+                setattr(owner, job["func"], staticmethod(wrapped))
+            else:
+                setattr(owner, job["func"], wrapped)
 
     def write(self, out, meta):
         with open(out, "w", encoding="utf-8") as f:
@@ -870,7 +978,12 @@ def child_state():
     recorder = None
     if mode == "record":
         os.environ[DISABLE_ENV] = "1"
-        recorder = Recorder(int(job["limit"]), os.getpid())
+        recorder = Recorder(
+            int(job["limit"]),
+            os.getpid(),
+            job.get("instance_method", False),
+            job.get("self_fields", ()),
+        )
         recorder.install(job, sys.modules.get("__main__"))
     state = ChildState(mode, out_dir, recorder)
     sys.modules["_fast_anything_state"] = state
@@ -889,7 +1002,12 @@ def cmd_record(job, argv):
     kind, target, rest = parse_target(argv)
     prepare_path(kind, target)
     os.environ[DISABLE_ENV] = "1"  # always record the original Python
-    recorder = Recorder(int(job["limit"]), 0xFA57)
+    recorder = Recorder(
+        int(job["limit"]),
+        0xFA57,
+        job.get("instance_method", False),
+        job.get("self_fields", ()),
+    )
     recorder.install(job)
     sys.modules["_fast_anything_state"] = ChildState("record", os.environ.get("FAST_ANYTHING_CHILDREN", ""), recorder)
     run_target(kind, target, rest)
@@ -900,6 +1018,22 @@ def cmd_record(job, argv):
         except (OSError, ValueError, KeyError):
             pass  # a worker that died before it finished writing
     recorder.write(job["out"], job["meta"])
+
+
+class _FnrSelfProxy:
+    pass
+
+
+def _wrap_instance_original(raw_original, self_fields):
+    n = len(self_fields)
+
+    def _proxy_call(*flat_args, **kwargs):
+        obj = _FnrSelfProxy()
+        for fname, fval in zip(self_fields, flat_args[:n]):
+            setattr(obj, fname, fval)
+        return raw_original(obj, *flat_args[n:], **kwargs)
+
+    return _proxy_call
 
 
 def cmd_verify(job, _argv):
@@ -921,6 +1055,8 @@ def cmd_verify(job, _argv):
     else:
         module = importlib.import_module(job["module"])
     original = getattr(getattr(module, job["owner"]) if job.get("owner") else module, job["func"])
+    if job.get("instance_method"):
+        original = _wrap_instance_original(original, job.get("self_fields", ()))
 
     with open(job["cases"], encoding="utf-8") as f:
         cases = [json.loads(line) for line in f if line.strip()]
@@ -1245,6 +1381,8 @@ def cmd_fuzz(job, _argv):
     else:
         module = importlib.import_module(job["module"])
     original = getattr(getattr(module, job["owner"]) if job.get("owner") else module, job["func"])
+    if job.get("instance_method"):
+        original = _wrap_instance_original(original, job.get("self_fields", ()))
 
     with open(job["cases"], encoding="utf-8") as f:
         cases = [json.loads(line) for line in f if line.strip()]

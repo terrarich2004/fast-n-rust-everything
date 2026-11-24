@@ -311,6 +311,12 @@ pub enum Cmd {
         crate_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "host")]
         profile: ProfileArg,
+        /// Build all `.fast/ports/*` crates with Ship LTO into `.fast/lib/` without needing state/recordings (for CI/Docker).
+        #[arg(long)]
+        deploy: bool,
+        /// Enable host-specific `-C target-cpu=native` when using `--deploy`.
+        #[arg(long)]
+        native_cpu: bool,
         #[arg(long)]
         abi: Vec<String>,
         #[arg(long)]
@@ -1207,11 +1213,19 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
         Cmd::Build {
             crate_dir,
             profile,
+            deploy,
+            native_cpu,
             abi,
             api,
             ndk,
             jni_libs,
         } => match crate_dir {
+            None if deploy => {
+                let built = fnr_fast::pipeline::build_deploy(root, native_cpu)?;
+                for p in built {
+                    println!("Built {}", p.display());
+                }
+            }
             None => fnr_fast::pipeline::build_all(root)?,
             Some(c) => {
                 let c = abs(&c);

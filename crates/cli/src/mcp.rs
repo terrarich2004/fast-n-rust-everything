@@ -642,7 +642,9 @@ pub fn compact_tools() -> Value {
                 "save_regressions": { "type": "boolean" },
                 "min_speedup": { "type": "number" },
                 "bench": { "type": "boolean" },
-                "runs": { "type": "integer" }
+                "runs": { "type": "integer" },
+                "deploy": { "type": "boolean" },
+                "native_cpu": { "type": "boolean" }
             }),
             req_action.clone(),
             false,
@@ -1449,6 +1451,10 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
                     "host" => json!({ "artifact": harness::build(&c)? }),
                     other => anyhow::bail!("unknown build profile `{other}`: use host or android"),
                 }
+            } else if args["deploy"].as_bool() == Some(true) {
+                let native_cpu = args["native_cpu"].as_bool().unwrap_or(false);
+                let built = fnr_fast::pipeline::build_deploy(&root, native_cpu)?;
+                json!({ "built_deploy": built })
             } else {
                 fnr_fast::pipeline::build_all(&root)?;
                 json!({ "built_all_fast": true })

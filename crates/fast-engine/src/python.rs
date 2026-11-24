@@ -200,7 +200,16 @@ pub fn record(
         .as_deref()
         .context("this function can't be imported")?;
     let meta = out.with_extension("meta.json");
-    let job = json!({ "module": module, "func": hs.name, "owner": hs.owner, "out": out, "meta": meta, "limit": limit });
+    let job = json!({
+        "module": module,
+        "func": hs.name,
+        "owner": hs.owner,
+        "instance_method": hs.instance_method,
+        "self_fields": hs.self_fields,
+        "out": out,
+        "meta": meta,
+        "limit": limit
+    });
     if module != "__main__" {
         helper(ctx, python, "record", job, app_args)?;
     } else {
@@ -212,12 +221,16 @@ pub fn record(
         fs::create_dir_all(&backup_dir)?;
         let backup = backup_dir.join(crate::util::slug(&hs.file));
         fs::write(&backup, &original)?;
-        let wrap = match hs.owner.as_deref() {
-            Some(cls) => format!(
+        let wrap = match (hs.owner.as_deref(), hs.instance_method) {
+            (Some(cls), true) => format!(
+                "try:\n    {cls}.{f} = __fast_anything_wrap__({cls}.{f})\nexcept NameError:\n    pass",
+                f = hs.name
+            ),
+            (Some(cls), false) => format!(
                 "try:\n    {cls}.{f} = staticmethod(__fast_anything_wrap__({cls}.{f}))\nexcept NameError:\n    pass",
                 f = hs.name
             ),
-            None => format!(
+            (None, _) => format!(
                 "try:\n    {f} = __fast_anything_wrap__({f})\nexcept NameError:\n    pass",
                 f = hs.name
             ),
@@ -837,6 +850,21 @@ pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path)
         }
         notes.push('\n');
     }
+    if port.instance_method {
+        let fields = if port.self_fields.is_empty() {
+            "no `self` fields".to_string()
+        } else {
+            port.self_fields
+                .iter()
+                .map(|f| format!("`self.{f}` -> `self_{f}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        notes.push_str(&format!(
+            "- Note: `{}` is a read-only instance method; lifted {fields}.\n",
+            hs.qualname
+        ));
+    }
     if lib_rs(hs, port).contains("numpy::") {
         notes.push_str("- Note: NDArray parameters arrive as `numpy::PyReadonlyArrayDyn` (`.as_array()` gives an ndarray view, `.as_slice()` a slice when contiguous); return arrays as `Py<numpy::PyArrayDyn<T>>`, e.g. `numpy::ndarray::Array::from(vec).into_dyn().into_pyarray(py).unbind()` with `use numpy::IntoPyArray`. verify compares shape, dtype and values.\n");
     }
@@ -941,6 +969,8 @@ pub fn verify_with(
         "module_file": ctx.root.join(&port.file),
         "func": port.func,
         "owner": port.owner,
+        "instance_method": port.instance_method,
+        "self_fields": port.self_fields,
         "cases": dir.join("recordings.jsonl"),
         "out": out,
         "budget": 0.5,
@@ -970,6 +1000,8 @@ pub fn fuzz_cases(
         "module_file": ctx.root.join(&port.file),
         "func": port.func,
         "owner": port.owner,
+        "instance_method": port.instance_method,
+        "self_fields": port.self_fields,
         "cases": cases_path,
         "out": out_path,
         "float_tolerance": float_tolerance,
@@ -983,28 +1015,55 @@ pub fn fuzz_cases(
 /// Lines appended to the module (between markers) that swap in the Rust function.
 pub fn shim(port: &Port, lib_rel: &str) -> String {
     let f = &port.func;
-    [
-        "# Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the Python above instead.",
-        &format!("# Undo with:  fnr disable {}", port.id),
-        "def _fast_anything_load():",
-        "    import os, sys",
-        "    if os.environ.get(\"FNR_DISABLE\") or os.environ.get(\"FAST_ANYTHING_DISABLE\"):",
-        "        return None",
-        &format!("    lib = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), \"{lib_rel}\"))"),
-        "    if lib not in sys.path:",
-        "        sys.path.append(lib)",
-        "    try:",
-        &format!("        from {} import {f}", port.ext),
-        "    except ImportError:",
-        "        return None",
-        &format!("    return {f}"),
-        &match port.owner.as_deref() {
-            Some(cls) => format!("{cls}.{f} = staticmethod(_fast_anything_load() or {cls}.{f})"),
-            None => format!("{f} = _fast_anything_load() or {f}"),
-        },
-        "del _fast_anything_load",
-    ]
-    .join("\n")
+    let mut lines = vec![
+        "# Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the Python above instead.".to_string(),
+        format!("# Undo with:  fnr disable {}", port.id),
+        "def _fast_anything_load():".to_string(),
+        "    import os, sys".to_string(),
+        "    if os.environ.get(\"FNR_DISABLE\") or os.environ.get(\"FAST_ANYTHING_DISABLE\"):".to_string(),
+        "        return None".to_string(),
+        format!("    _rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), \"{lib_rel}\"))"),
+        "    _override = os.environ.get(\"FNR_LIB_DIR\")".to_string(),
+        "    for _cand in ([_override] if _override else []) + [_rel]:".to_string(),
+        "        if _cand and os.path.isdir(_cand) and _cand not in sys.path:".to_string(),
+        "            sys.path.insert(0, _cand) if _cand == _override else sys.path.append(_cand)".to_string(),
+        "    try:".to_string(),
+        format!("        from {} import {f}", port.ext),
+        "    except ImportError as _err:".to_string(),
+        "        if os.environ.get(\"FNR_STRICT\", \"\").lower() in (\"1\", \"true\"):".to_string(),
+        format!("            raise ImportError(f\"fnr: FNR_STRICT=1 and Rust port {} ({}) could not be loaded: {{_err}}\") from _err", port.id, port.ext),
+        "        return None".to_string(),
+        format!("    return {f}"),
+    ];
+    match (port.owner.as_deref(), port.instance_method) {
+        (Some(cls), true) => {
+            let field_args = port
+                .self_fields
+                .iter()
+                .map(|sf| format!("self.{sf}"))
+                .collect::<Vec<_>>();
+            let call_args = if field_args.is_empty() {
+                "*args, **kwargs".to_string()
+            } else {
+                format!("{}, *args, **kwargs", field_args.join(", "))
+            };
+            lines.push("_fnr_loaded = _fast_anything_load()".to_string());
+            lines.push("if _fnr_loaded is not None:".to_string());
+            lines.push(
+                "    def _fnr_method(self, *args, _fnr_fn=_fnr_loaded, **kwargs):".to_string(),
+            );
+            lines.push(format!("        return _fnr_fn({call_args})"));
+            lines.push(format!("    {cls}.{f} = _fnr_method"));
+            lines.push("    del _fnr_method".to_string());
+            lines.push("del _fnr_loaded".to_string());
+        }
+        (Some(cls), false) => lines.push(format!(
+            "{cls}.{f} = staticmethod(_fast_anything_load() or {cls}.{f})"
+        )),
+        (None, _) => lines.push(format!("{f} = _fast_anything_load() or {f}")),
+    }
+    lines.push("del _fast_anything_load".to_string());
+    lines.join("\n")
 }
 
 pub fn strip_shim(text: &str, id: &str) -> String {
@@ -1053,6 +1112,8 @@ mod tests {
             enabled: false,
             lang: crate::backend::Lang::Python,
             owner: None,
+            instance_method: false,
+            self_fields: vec![],
             line: 1,
             sources: vec![],
             build_profile: None,
@@ -1170,17 +1231,33 @@ mod tests {
         fs::write(dir.join("runner.py"), RUNNER).unwrap();
         fs::write(
             dir.join("text.py"),
-            "class Text:\n    @staticmethod\n    def lev(a: str, b: str) -> int:\n        return 0\n\n    def size(self) -> int:\n        return 0\n",
+            "class Text:\n\
+             \x20   factor: int\n\
+             \x20   @staticmethod\n\
+             \x20   def lev(a: str, b: str) -> int:\n\
+             \x20       return 0\n\n\
+             \x20   def size(self) -> int:\n\
+             \x20       return 0\n\n\
+             \x20   def scale(self, x: int) -> int:\n\
+             \x20       return x * self.factor\n\n\
+             \x20   def bump(self) -> int:\n\
+             \x20       self.factor += 1\n\
+             \x20       return self.factor\n",
         )
         .unwrap();
         let check = "import runpy, sys, os\n\
                      d = sys.argv[1]\n\
                      describe = runpy.run_path(os.path.join(d, 'runner.py'))['describe']\n\
                      f = os.path.join(d, 'text.py')\n\
-                     info = describe(f, 3, 'lev', None, d)\n\
-                     assert info['owner'] == 'Text' and info['blockers'] == [], info\n\
-                     info = describe(f, 6, 'size', None, d)\n\
-                     assert info['owner'] is None and info['blockers'], info\n";
+                     info = describe(f, 4, 'lev', None, d)\n\
+                     assert info['owner'] == 'Text' and not info['instance_method'] and info['blockers'] == [], info\n\
+                     info = describe(f, 7, 'size', None, d)\n\
+                     assert info['owner'] == 'Text' and info['instance_method'] and info['blockers'] == [], info\n\
+                     info = describe(f, 10, 'scale', None, d)\n\
+                     assert info['owner'] == 'Text' and info['instance_method'] and info['self_fields'] == ['factor'] and info['blockers'] == [], info\n\
+                     assert info['params'][0]['name'] == 'self_factor' and info['params'][0]['annotation'] == 'int', info\n\
+                     info = describe(f, 13, 'bump', None, d)\n\
+                     assert 'mutates self' in info['blockers'], info\n";
         let out = Command::new(python)
             .args(["-I", "-c", check])
             .arg(&dir)

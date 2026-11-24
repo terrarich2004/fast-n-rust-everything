@@ -2583,6 +2583,8 @@ mod tests {
             enabled: false,
             lang: Lang::C,
             owner: None,
+            instance_method: false,
+            self_fields: vec![],
             line: 1,
             sources: vec![],
             build_profile: None,

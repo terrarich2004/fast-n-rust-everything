@@ -3,7 +3,7 @@
 
 use crate::hotspot::Hotspot;
 use crate::state::{Ctx, Port, Verify};
-use crate::util::{combined, output, tail};
+use crate::util::{self, combined, output, tail};
 use crate::{cfamily, csharp, golang, java, kotlin, node, php, python, r, ruby};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -476,7 +476,6 @@ fn build_inner(
     opts: BuildOptions,
     extra_rustflags: &[String],
 ) -> Result<std::result::Result<PathBuf, String>> {
-    let exe = ctx.runtime()?;
     let dir = ctx.crate_dir(port);
     ensure!(
         dir.join("Cargo.toml").exists(),
@@ -484,6 +483,22 @@ fn build_inner(
         port.id,
         port.id
     );
+    let pyo3_python = if port.lang == Lang::Python {
+        if let Some(rt) = ctx.state.runtime.as_deref() {
+            Some(rt.to_string())
+        } else if let Ok(env_py) = std::env::var("PYO3_PYTHON")
+            && !env_py.trim().is_empty()
+        {
+            Some(env_py)
+        } else {
+            Some(
+                crate::python::resolve("python3", &ctx.root)
+                    .or_else(|_| crate::python::resolve("python", &ctx.root))?,
+            )
+        }
+    } else {
+        None
+    };
     let target = target_dir(ctx);
     let has_ship = fs::read_to_string(dir.join("Cargo.toml"))
         .map(|t| t.contains("[profile.ship]"))
@@ -506,7 +521,7 @@ fn build_inner(
         }
     };
     cmd.current_dir(&dir).env("CARGO_TARGET_DIR", &target);
-    if port.lang == Lang::Python {
+    if let Some(ref exe) = pyo3_python {
         cmd.env("PYO3_PYTHON", exe);
     }
     if !extra_rustflags.is_empty() {
@@ -603,6 +618,68 @@ fn find_llvm_profdata() -> Result<PathBuf> {
         return Ok(PathBuf::from("llvm-profdata"));
     }
     bail!("llvm-profdata not found; install it with `rustup component add llvm-tools`");
+}
+
+/// Infer a minimal `Port` descriptor from a `.fast/ports/<dir>/Cargo.toml` for clean deploy builds
+/// when `.fast/state.json` is absent (e.g. Docker builds or fresh CI checkouts).
+pub fn infer_port_from_manifest(root: &Path, crate_dir: &Path) -> Result<Port> {
+    let manifest = crate_dir.join("Cargo.toml");
+    let text =
+        fs::read_to_string(&manifest).with_context(|| format!("reading {}", manifest.display()))?;
+    let mut section = String::new();
+    let mut pkg_name: Option<String> = None;
+    let mut lib_name: Option<String> = None;
+    let mut has_pyo3 = false;
+    let mut has_napi = false;
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line.to_string();
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let key = k.trim();
+            let val = v.trim().trim_matches('"');
+            if key == "name" {
+                if section == "[package]" {
+                    pkg_name = Some(val.to_string());
+                } else if section == "[lib]" {
+                    lib_name = Some(val.to_string());
+                }
+            } else if section == "[dependencies]" {
+                if key == "pyo3" {
+                    has_pyo3 = true;
+                } else if key == "napi" || key == "napi-derive" {
+                    has_napi = true;
+                }
+            }
+        }
+    }
+    let dir_name = crate_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("port");
+    let ext = lib_name
+        .or(pkg_name)
+        .unwrap_or_else(|| format!("fa_{}", util::slug(dir_name)));
+    let lang = if has_pyo3 {
+        Lang::Python
+    } else if has_napi {
+        Lang::Node
+    } else {
+        Lang::C
+    };
+    let rel_dir = util::forward_slashes(&util::relative(root, crate_dir));
+    Ok(Port {
+        id: dir_name.to_string(),
+        ext,
+        crate_dir: rel_dir,
+        lang,
+        ..Port::default()
+    })
 }
 
 /// Profile-Guided Optimization build for an already-enabled port:

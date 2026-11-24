@@ -161,22 +161,31 @@ function describe(file, line0, name, entry, root) {
       blockers.push("lives in the entry script, which runs on import: put its main code under if (import.meta.main) (or require.main === module)");
     else if (lineStart > guard) blockers.push("defined inside or after the if (import.meta.main) block");
   }
-  // a static method directly in the body of a top-level class is called as Class.name(...), like a function
+  // a static or read-only instance method directly in the body of a top-level class
   let owner = null;
-  if (kind === "method" && m[2]) {
+  let classInfo = null;
+  if (kind === "method") {
     for (const c of code.matchAll(new RegExp("^(?:export\\s+)?(?:default\\s+)?class\\s+(" + IDENT + ")[^{]*\\{", "gm"))) {
-      const body = c.index + c[0].length - 1;
-      if (body > lineStart || matching(code, body) < close) continue;
+      const cBody = c.index + c[0].length - 1;
+      const cEnd = matching(code, cBody);
+      if (cBody > lineStart || cEnd < close) continue;
       let depth = 0;
-      for (const ch of code.slice(body, lineStart)) depth += ch === "{" ? 1 : ch === "}" ? -1 : 0;
-      if (depth === 1) owner = c[1];
+      for (const ch of code.slice(cBody, lineStart)) depth += ch === "{" ? 1 : ch === "}" ? -1 : 0;
+      if (depth === 1) {
+        owner = c[1];
+        classInfo = { name: c[1], bodyStart: cBody, bodyEnd: cEnd };
+      }
     }
   }
+  const instanceMethod = kind === "method" && Boolean(owner) && !m[2];
   if ((kind === "method" && !owner) || (kind !== "method" && indent > 0))
-    blockers.push("method or nested function (top-level functions and static methods only for now)");
+    blockers.push("method or nested function (top-level functions and class methods only for now)");
+  if (instanceMethod && name === "constructor") blockers.push("constructor");
   if (kind === "function" && m[4]) blockers.push("async");
   if (kind === "function" && m[5]) blockers.push("generator (function*)");
   if (kind === "binding" && m[5]) blockers.push("async");
+  if (kind === "method" && m[3]) blockers.push("async");
+  if (kind === "method" && m[4]) blockers.push("generator (*)");
   if (kind === "binding" && m[3] === "const") warnings.push("declared with const, it's declared with let while the port is switched on");
 
   const after = close + 1;
@@ -199,13 +208,36 @@ function describe(file, line0, name, entry, root) {
   const nondet = new Set([...body.matchAll(NONDET)].map((x) => x[0]));
   if (/\byield\b/.test(body) && !blockers.some((b) => b.startsWith("generator"))) blockers.push("generator (yield)");
   if (/\bawait\b/.test(body) && !blockers.includes("async")) blockers.push("async");
-  if (/\bthis\b/.test(body)) blockers.push("uses this");
+  let selfFields = [];
+  if (instanceMethod) {
+    if (/\bsuper\b/.test(body)) blockers.push("uses super");
+    const strippedThis = body.replace(/\bthis\.([A-Za-z_$][\w$]*)/g, "");
+    if (/\bthis\b/.test(strippedThis)) blockers.push("passes this as an object");
+    if (/\bthis\.[A-Za-z_$][\w$]*\s*(?:[+\-*/%&|^]?=(?!=)|\+\+|--)|(?:\+\+|--)\s*this\.[A-Za-z_$][\w$]*|\bdelete\s+this\.[A-Za-z_$][\w$]*/.test(body))
+      blockers.push("mutates this");
+    if (/\bthis\.[A-Za-z_$][\w$]*\s*\(/.test(body)) blockers.push("calls methods on this");
+    const fields = new Set();
+    for (const rm of body.matchAll(/\bthis\.([A-Za-z_$][\w$]*)/g)) fields.add(rm[1]);
+    selfFields = [...fields].sort();
+  } else {
+    if (/\bthis\b/.test(body)) blockers.push("uses this");
+  }
   if (io.size) blockers.push("does I/O: " + [...io].slice(0, 3).join(", "));
   if (nondet.size) blockers.push("not deterministic: " + [...nondet].slice(0, 3).join(", "));
   const helpers = [...top].filter((h) => h !== name && new RegExp("\\b" + esc(h) + "\\s*\\(").test(body));
   if (helpers.length) warnings.push("calls " + helpers.slice(0, 3).join(", ") + ", they get ported together with it");
 
-  const params = parseParams(src.slice(open + 1, close));
+  const fieldTypes = new Map();
+  if (instanceMethod && classInfo) {
+    const classSrc = src.slice(classInfo.bodyStart, classInfo.bodyEnd);
+    for (const fm of classSrc.matchAll(/^\s*(?:readonly|private|public|protected|declare|\s)*([A-Za-z_$][\w$]*)\s*[!?]?\s*:\s*([^;=\n]+)/gm)) {
+      fieldTypes.set(fm[1], fm[2].trim());
+    }
+  }
+  const params = [
+    ...(instanceMethod ? selfFields.map((f) => ({ name: "this_" + f, annotation: fieldTypes.get(f) ?? null })) : []),
+    ...parseParams(src.slice(open + 1, close)),
+  ];
   if (params.some((p) => p.rest)) {
     warnings.push("takes ...rest parameters");
     factor *= 0.7;
@@ -222,6 +254,8 @@ function describe(file, line0, name, entry, root) {
     qualname: owner ? owner + "." + name : name,
     module,
     owner,
+    instance_method: instanceMethod,
+    self_fields: selfFields,
     kind: kind === "method" || indent > 0 ? "method" : "function",
     end_line: src.slice(0, bodyEnd + 1).split("\n").length,
     params: params.map(({ name, annotation }) => ({ name, annotation })),
@@ -537,6 +571,16 @@ function bestPass(fn, calls, budget) {
   return best;
 }
 
+function wrapInstanceOriginal(rawOriginal, job) {
+  if (typeof rawOriginal !== "function" || !job.instance_method) return rawOriginal;
+  const selfFields = Array.isArray(job.self_fields) ? job.self_fields : [];
+  return (...flatArgs) => {
+    const selfObj = {};
+    for (let i = 0; i < selfFields.length; i++) selfObj[selfFields[i]] = flatArgs[i];
+    return rawOriginal.apply(selfObj, flatArgs.slice(selfFields.length));
+  };
+}
+
 async function verify(job) {
   process.env.FAST_ANYTHING_DISABLE = "1";
   const fast = createRequire(import.meta.url)(job.addon)[job.js_name];
@@ -548,7 +592,8 @@ async function verify(job) {
   };
   try {
     const mod = await import(pathToFileURL(job.module_file).href);
-    original = handed ?? mod[job.func] ?? mod.default?.[job.func] ?? null;
+    const protoFn = job.instance_method && job.owner ? mod[job.owner]?.prototype?.[job.func] : null;
+    original = wrapInstanceOriginal(handed ?? protoFn ?? mod[job.func] ?? mod.default?.[job.func] ?? null, job);
   } catch {}
 
   const tol = job.float_tolerance ?? null;
@@ -624,7 +669,8 @@ async function fuzz(job) {
   };
   try {
     const mod = await import(pathToFileURL(job.module_file).href);
-    original = handed ?? mod[job.func] ?? mod.default?.[job.func] ?? null;
+    const protoFn = job.instance_method && job.owner ? mod[job.owner]?.prototype?.[job.func] : null;
+    original = wrapInstanceOriginal(handed ?? protoFn ?? mod[job.func] ?? mod.default?.[job.func] ?? null, job);
   } catch {}
   const cases = readFileSync(job.cases, "utf8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
   const tol = job.float_tolerance ?? null;

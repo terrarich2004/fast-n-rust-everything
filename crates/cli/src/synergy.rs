@@ -688,13 +688,12 @@ fn normalize_c_scalar_type(ty: &str) -> &str {
     }
 }
 
-fn splice_c_abi_stub(dst_port: &str, fast_port: &str, func_name: &str) -> Option<String> {
-    let sig_needle = format!("pub fn {func_name}(");
-    let fn_start = dst_port.find(&sig_needle)?;
+fn split_fn_signature(src: &str, sig_needle: &str) -> Option<(usize, usize, usize, usize)> {
+    let fn_start = src.find(sig_needle)?;
     let paren_open = fn_start + sig_needle.len() - 1;
     let mut depth = 0usize;
     let mut paren_close = None;
-    for (off, ch) in dst_port[paren_open..].char_indices() {
+    for (off, ch) in src[paren_open..].char_indices() {
         match ch {
             '(' => depth += 1,
             ')' => {
@@ -708,8 +707,16 @@ fn splice_c_abi_stub(dst_port: &str, fast_port: &str, func_name: &str) -> Option
         }
     }
     let paren_close = paren_close?;
-    let brace_rel = dst_port[paren_close..].find('{')?;
+    let brace_rel = src[paren_close..].find('{')?;
     let brace_open = paren_close + brace_rel;
+    let brace_close = find_matching_brace(src, brace_open)?;
+    (brace_close > brace_open).then_some((fn_start, paren_open, paren_close, brace_open))
+}
+
+fn splice_c_abi_stub(dst_port: &str, fast_port: &str, func_name: &str) -> Option<String> {
+    let sig_needle = format!("pub fn {func_name}(");
+    let (fn_start, paren_open, paren_close, brace_open) =
+        split_fn_signature(dst_port, &sig_needle)?;
     let brace_close = find_matching_brace(dst_port, brace_open)?;
     let body = &dst_port[brace_open + 1..brace_close];
     if !body.contains("unimplemented!") && !body.contains("todo!") {
@@ -727,15 +734,22 @@ fn splice_c_abi_stub(dst_port: &str, fast_port: &str, func_name: &str) -> Option
     }
     let sig_ret = dst_port[paren_close + 1..brace_open].trim();
     let has_ret = sig_ret.starts_with("->");
+    let dst_returns_result = sig_ret.contains("Result<");
 
-    let fast_sig_pos = fast_port.find(&sig_needle)?;
-    let fast_paren_open = fast_sig_pos + sig_needle.len() - 1;
-    let fast_paren_close = fast_port[fast_paren_open..].find(')')? + fast_paren_open;
+    let (_, fast_paren_open, fast_paren_close, fast_brace_open) =
+        split_fn_signature(fast_port, &sig_needle)?;
     let fast_params = split_top_level_params(&fast_port[fast_paren_open + 1..fast_paren_close]);
-    let fast_brace_open = fast_port[fast_paren_close..].find('{')? + fast_paren_close;
     let fast_returns_result = fast_port[fast_paren_close + 1..fast_brace_open]
         .trim()
         .contains("Result<");
+    let fast_brace_close = find_matching_brace(fast_port, fast_brace_open)?;
+    let fast_body = &fast_port[fast_brace_open + 1..fast_brace_close];
+    let fast_has_err_path = fast_body.contains("Err(") || fast_body.contains('?');
+
+    if !dst_returns_result && fast_returns_result && fast_has_err_path {
+        // Never silently coerce a fallible Result error into a zero/default scalar.
+        return None;
+    }
 
     let mut used_cast = false;
     let arg_exprs: Vec<String> = params
@@ -755,11 +769,17 @@ fn splice_c_abi_stub(dst_port: &str, fast_port: &str, func_name: &str) -> Option
         .collect();
 
     let call = format!("__fnr_hotspot_impl::{func_name}({})", arg_exprs.join(", "));
-    let replacement_body = match (has_ret, fast_returns_result) {
-        (true, true) => format!("\n    {call}.unwrap_or_default()\n"),
-        (true, false) => format!("\n    {call}\n"),
-        (false, true) => format!("\n    let _ = {call};\n"),
-        (false, false) => format!("\n    {call};\n"),
+    let replacement_body = match (dst_returns_result, has_ret, fast_returns_result) {
+        (true, _, true) => format!("\n    {call}.map_err(|e| e.to_string())\n"),
+        (true, _, false) => format!("\n    Ok({call})\n"),
+        (false, true, true) => {
+            format!(
+                "\n    match {call} {{\n        Ok(v) => v,\n        Err(e) => panic!(\"fnr: {{e}}\"),\n    }}\n"
+            )
+        }
+        (false, false, true) => format!("\n    let _ = {call};\n"),
+        (false, true, false) => format!("\n    {call}\n"),
+        (false, false, false) => format!("\n    {call};\n"),
     };
 
     let mut out = String::with_capacity(dst_port.len() + fast_port.len() + 128);
@@ -774,10 +794,277 @@ fn splice_c_abi_stub(dst_port: &str, fast_port: &str, func_name: &str) -> Option
     out.push_str(&dst_port[brace_close..]);
     out.push_str("\n#[allow(dead_code, clippy::all)]\nmod __fnr_hotspot_impl {\n");
     for line in fast_port.lines() {
-        // Strip outer crate-level attributes inside the nested module.
-        if line.trim_start().starts_with("#![") {
+        // Strip outer crate-level attributes and inner doc comments inside the nested module,
+        // and keep any `pub struct` module-private so `migrate_engine::codegen::parse_port`
+        // doesn't treat it as an export.
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#![") || trimmed.starts_with("//!") {
             continue;
         }
+        let rewritten = if let Some(rest) = trimmed.strip_prefix("/*!") {
+            let indent = &line[..line.len() - trimmed.len()];
+            format!("{indent}/*{rest}")
+        } else if let Some(rest) = trimmed.strip_prefix("pub struct ") {
+            let indent = &line[..line.len() - trimmed.len()];
+            format!("{indent}pub(super) struct {rest}")
+        } else {
+            line.to_string()
+        };
+        out.push_str("    ");
+        out.push_str(&rewritten);
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    Some(out)
+}
+
+fn is_numeric_scalar_rust(ty: &str) -> bool {
+    matches!(
+        ty.trim(),
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
+}
+
+fn strip_pymodule_blocks(src: &str) -> String {
+    let mut out = src.to_string();
+    while let Some(attr_idx) = out.find("#[pymodule]") {
+        let line_start = out[..attr_idx].rfind('\n').map_or(0, |i| i + 1);
+        if let Some(brace_rel) = out[attr_idx..].find('{') {
+            let brace_open = attr_idx + brace_rel;
+            if let Some(brace_close) = find_matching_brace(&out, brace_open) {
+                let end = out[brace_close + 1..]
+                    .strip_prefix('\n')
+                    .map_or(brace_close + 1, |_| brace_close + 2);
+                out.replace_range(line_start..end, "");
+                continue;
+            }
+        }
+        break;
+    }
+    out
+}
+
+fn sanitize_native_impl_body(fast_src: &str, target_fn: &str, lang: FastLang) -> Option<String> {
+    let cleaned = if lang == FastLang::Python {
+        strip_pymodule_blocks(fast_src)
+    } else {
+        fast_src.to_string()
+    };
+
+    let mut lines_out = Vec::new();
+    let mut skipping_use = false;
+    let mut saw_target = false;
+    let mut in_pyo3_attr = false;
+    for raw in cleaned.lines() {
+        let trimmed = raw.trim();
+        if skipping_use {
+            if trimmed.ends_with(';') {
+                skipping_use = false;
+            }
+            continue;
+        }
+        if in_pyo3_attr {
+            if trimmed.ends_with(']') {
+                in_pyo3_attr = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("#![") || trimmed.starts_with("//!") {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("/*!") {
+            let indent = &raw[..raw.len() - raw.trim_start().len()];
+            lines_out.push(format!("{indent}/*{rest}"));
+            continue;
+        }
+        if trimmed.starts_with("use pyo3")
+            || trimmed.starts_with("use napi")
+            || trimmed.starts_with("use napi_derive")
+        {
+            if !trimmed.ends_with(';') {
+                skipping_use = true;
+            }
+            continue;
+        }
+        if trimmed == "#[pyfunction]"
+            || trimmed == "#[napi]"
+            || trimmed.starts_with("#[pyo3(")
+            || trimmed.starts_with("#[napi(")
+        {
+            if !trimmed.ends_with(']') {
+                in_pyo3_attr = true;
+            }
+            continue;
+        }
+        let indent = &raw[..raw.len() - raw.trim_start().len()];
+        let tstart = raw.trim_start();
+        if indent.is_empty() {
+            if let Some(rest) = tstart.strip_prefix(&format!("fn {target_fn}(")) {
+                saw_target = true;
+                lines_out.push(format!("pub(super) fn {target_fn}({rest}"));
+                continue;
+            }
+            if let Some(rest) = tstart.strip_prefix(&format!("pub fn {target_fn}(")) {
+                saw_target = true;
+                lines_out.push(format!("pub(super) fn {target_fn}({rest}"));
+                continue;
+            }
+            if let Some(rest) = tstart.strip_prefix(&format!("pub(crate) fn {target_fn}(")) {
+                saw_target = true;
+                lines_out.push(format!("pub(super) fn {target_fn}({rest}"));
+                continue;
+            }
+        }
+        if let Some(rest) = tstart.strip_prefix("pub struct ") {
+            lines_out.push(format!("{indent}pub(super) struct {rest}"));
+        } else if let Some(rest) = tstart.strip_prefix("pub enum ") {
+            lines_out.push(format!("{indent}pub(super) enum {rest}"));
+        } else {
+            lines_out.push(raw.to_string());
+        }
+    }
+    if !saw_target {
+        return None;
+    }
+    Some(lines_out.join("\n"))
+}
+
+fn splice_native_macro_port(
+    dst_port: &str,
+    fast_src: &str,
+    func_name: &str,
+    lang: FastLang,
+) -> Option<String> {
+    let rust_name = bridge::snake_case(func_name);
+    let dst_needle_sync = format!("pub fn {rust_name}(");
+    let dst_needle_alt = format!("pub fn {func_name}(");
+    let (dst_fn_start, dst_paren_open, dst_paren_close, dst_brace_open) =
+        split_fn_signature(dst_port, &dst_needle_sync)
+            .or_else(|| split_fn_signature(dst_port, &dst_needle_alt))?;
+    let dst_brace_close = find_matching_brace(dst_port, dst_brace_open)?;
+    let dst_body = &dst_port[dst_brace_open + 1..dst_brace_close];
+    if !dst_body.contains("unimplemented!") && !dst_body.contains("todo!") {
+        return None;
+    }
+
+    let sanitized_body = sanitize_native_impl_body(fast_src, &rust_name, lang)
+        .map(|b| (rust_name.clone(), b))
+        .or_else(|| {
+            sanitize_native_impl_body(fast_src, func_name, lang).map(|b| (func_name.to_string(), b))
+        })?;
+    let (target_fn, impl_code) = sanitized_body;
+
+    let fast_needle = format!("pub(super) fn {target_fn}(");
+    let (_, fast_paren_open, fast_paren_close, fast_brace_open) =
+        split_fn_signature(&impl_code, &fast_needle)?;
+    let fast_params = split_top_level_params(&impl_code[fast_paren_open + 1..fast_paren_close]);
+    let fast_ret_sig = impl_code[fast_paren_close + 1..fast_brace_open].trim();
+
+    let dst_params = split_top_level_params(&dst_port[dst_paren_open + 1..dst_paren_close]);
+    let dst_ret_sig = dst_port[dst_paren_close + 1..dst_brace_open].trim();
+    let dst_returns_result = dst_ret_sig.contains("Result<");
+    let fast_returns_result =
+        fast_ret_sig.contains("PyResult<") || fast_ret_sig.contains("Result<");
+    if !dst_returns_result && fast_returns_result {
+        return None;
+    }
+
+    let has_py_ctx = lang == FastLang::Python
+        && fast_params
+            .first()
+            .is_some_and(|(_, ty)| ty.replace(' ', "").starts_with("Python<"));
+    let value_params = if has_py_ctx {
+        &fast_params[1..]
+    } else {
+        &fast_params[..]
+    };
+    if value_params.len() != dst_params.len() {
+        return None;
+    }
+
+    let mut call_args = Vec::new();
+    if has_py_ctx {
+        call_args.push("__fnr_hotspot_impl::DummyPy".to_string());
+    }
+    let mut used_cast = false;
+    for ((dst_name, dst_ty), (_, fast_ty)) in dst_params.iter().zip(value_params.iter()) {
+        let d = dst_ty.replace(' ', "");
+        let f = fast_ty.replace(' ', "");
+        if [
+            "Bound<",
+            "PyAny",
+            "PyModule",
+            "PyObject",
+            "JsUnknown",
+            "Env",
+        ]
+        .iter()
+        .any(|bad| f.contains(bad))
+        {
+            return None;
+        }
+        if d == f {
+            call_args.push(dst_name.clone());
+        } else if f == format!("Option<{d}>") {
+            call_args.push(format!("Some({dst_name})"));
+        } else if d == format!("Option<{f}>") && dst_returns_result {
+            call_args.push(format!(
+                "{dst_name}.ok_or_else(|| \"missing optional argument\".to_string())?"
+            ));
+        } else if is_numeric_scalar_rust(&d) && is_numeric_scalar_rust(&f) {
+            used_cast = true;
+            call_args.push(format!("{dst_name} as _"));
+        } else {
+            return None;
+        }
+    }
+
+    let call = format!("__fnr_hotspot_impl::{target_fn}({})", call_args.join(", "));
+    let replacement_body = match (dst_returns_result, fast_returns_result) {
+        (true, true) => format!("\n    {call}\n"),
+        (true, false) => format!("\n    Ok({call})\n"),
+        (false, false) => format!("\n    {call}\n"),
+        (false, true) => return None,
+    };
+
+    let prelude = match lang {
+        FastLang::Python => {
+            "#[derive(Clone, Copy)]\n    pub(super) struct DummyPy;\n    impl DummyPy {\n        pub(super) fn detach<F: FnOnce() -> R, R>(self, f: F) -> R { f() }\n        pub(super) fn allow_threads<F: FnOnce() -> R, R>(self, f: F) -> R { f() }\n    }\n    type Python<'a> = DummyPy;\n    type PyResult<T> = std::result::Result<T, String>;\n    struct PyValueError;\n    impl PyValueError { fn new_err<S: Into<String>>(msg: S) -> String { msg.into() } }\n    struct PyTypeError;\n    impl PyTypeError { fn new_err<S: Into<String>>(msg: S) -> String { msg.into() } }\n    struct PyRuntimeError;\n    impl PyRuntimeError { fn new_err<S: Into<String>>(msg: S) -> String { msg.into() } }\n    struct PyKeyError;\n    impl PyKeyError { fn new_err<S: Into<String>>(msg: S) -> String { msg.into() } }\n    struct PyIndexError;\n    impl PyIndexError { fn new_err<S: Into<String>>(msg: S) -> String { msg.into() } }\n"
+        }
+        FastLang::Node => {
+            "type Result<T, E = String> = std::result::Result<T, E>;\n    struct Error;\n    impl Error { fn from_reason<S: Into<String>>(msg: S) -> String { msg.into() } }\n"
+        }
+        _ => "",
+    };
+
+    let mut out = String::with_capacity(dst_port.len() + impl_code.len() + 512);
+    if used_cast {
+        out.push_str(&dst_port[..dst_fn_start]);
+        out.push_str("#[allow(trivial_numeric_casts)]\n");
+        out.push_str(&dst_port[dst_fn_start..dst_brace_open + 1]);
+    } else {
+        out.push_str(&dst_port[..dst_brace_open + 1]);
+    }
+    out.push_str(&replacement_body);
+    out.push_str(&dst_port[dst_brace_close..]);
+    out.push_str("\n#[allow(dead_code, unused_imports, clippy::all)]\nmod __fnr_hotspot_impl {\n");
+    if !prelude.is_empty() {
+        out.push_str("    ");
+        out.push_str(prelude);
+    }
+    for line in impl_code.lines() {
         out.push_str("    ");
         out.push_str(line);
         out.push('\n');
@@ -786,65 +1073,104 @@ fn splice_c_abi_stub(dst_port: &str, fast_port: &str, func_name: &str) -> Option
     Some(out)
 }
 
-/// Attempts to splice an already-implemented C-bridge hotspot `src/port.rs` into a freshly
-/// bridged `rust/<unit>` crate, validating with `bridge::refresh` and rolling back on mismatch.
+/// Attempts to splice an already-implemented hotspot port (`src/port.rs` or `src/lib.rs`) into a
+/// freshly bridged `rust/<unit>` crate, validating with `bridge::refresh` (and `cargo check` for
+/// Python/Node macro ports) and rolling back cleanly on mismatch.
 pub(crate) fn try_splice_hotspot_port(
     fast_crate: &Path,
     bridged_crate: &Path,
     func_name: &str,
     lang: FastLang,
 ) -> Result<bool> {
-    if !lang.c_bridge() {
-        return Ok(false);
-    }
-    let fast_port_path = fast_crate.join("src/port.rs");
     let dst_port_path = bridged_crate.join("src/port.rs");
-    if !fast_port_path.is_file() || !dst_port_path.is_file() {
+    if !dst_port_path.is_file() {
         return Ok(false);
     }
-
-    let fast_port = fs::read_to_string(&fast_port_path)?;
-    if fast_port.contains("todo!(")
-        || fast_port.contains("unimplemented!(")
-        || !fast_port.contains(&format!("pub fn {func_name}("))
-    {
-        return Ok(false);
-    }
-
     let dst_port = fs::read_to_string(&dst_port_path)?;
-    if dst_port.contains("#![forbid(unsafe_code)]") && has_unsafe_token(&fast_port) {
+
+    let fast_src_path = if lang.c_bridge() {
+        fast_crate.join("src/port.rs")
+    } else if matches!(lang, FastLang::Python | FastLang::Node) {
+        fast_crate.join("src/lib.rs")
+    } else {
+        return Ok(false);
+    };
+    if !fast_src_path.is_file() {
+        return Ok(false);
+    }
+
+    let fast_src = fs::read_to_string(&fast_src_path)?;
+    if fast_src.contains("todo!(") || fast_src.contains("unimplemented!(") {
+        return Ok(false);
+    }
+    if dst_port.contains("#![forbid(unsafe_code)]") && has_unsafe_token(&fast_src) {
         return Ok(false);
     }
 
     let manifest = bridge::Manifest::load(bridged_crate)?;
-    let candidate = match manifest.kind {
-        bridge::Kind::CAbi => splice_c_abi_stub(&dst_port, &fast_port, func_name),
-        bridge::Kind::Ffi
-            if manifest.exports.len() == 1 && manifest.exports[0].name == func_name =>
-        {
-            if dst_port.contains("#![forbid(unsafe_code)]")
-                && !fast_port.contains("#![forbid(unsafe_code)]")
-            {
-                Some(format!("#![forbid(unsafe_code)]\n\n{fast_port}"))
-            } else {
-                Some(fast_port)
+    let candidate = if matches!(lang, FastLang::Python | FastLang::Node) {
+        splice_native_macro_port(&dst_port, &fast_src, func_name, lang)
+    } else {
+        match manifest.kind {
+            bridge::Kind::CAbi => {
+                if !fast_src.contains(&format!("pub fn {func_name}(")) {
+                    None
+                } else {
+                    splice_c_abi_stub(&dst_port, &fast_src, func_name)
+                }
             }
+            bridge::Kind::Ffi
+                if manifest.exports.len() == 1 && manifest.exports[0].name == func_name =>
+            {
+                if !fast_src.contains(&format!("pub fn {func_name}(")) {
+                    None
+                } else if dst_port.contains("#![forbid(unsafe_code)]")
+                    && !fast_src.contains("#![forbid(unsafe_code)]")
+                {
+                    Some(format!("#![forbid(unsafe_code)]\n\n{fast_src}"))
+                } else {
+                    Some(fast_src)
+                }
+            }
+            bridge::Kind::Ffi if manifest.exports.iter().any(|e| e.name == func_name) => {
+                if !fast_src.contains(&format!("pub fn {func_name}(")) {
+                    None
+                } else {
+                    splice_c_abi_stub(&dst_port, &fast_src, func_name)
+                }
+            }
+            _ => None,
         }
-        _ => None,
     };
 
     let Some(new_port) = candidate else {
         return Ok(false);
     };
     fs::write(&dst_port_path, &new_port)?;
-    match bridge::refresh(bridged_crate) {
-        Ok(_) => Ok(true),
-        Err(_) => {
+    if bridge::refresh(bridged_crate).is_err() {
+        fs::write(&dst_port_path, &dst_port)?;
+        let _ = bridge::refresh(bridged_crate);
+        return Ok(false);
+    }
+    if matches!(lang, FastLang::Python | FastLang::Node) {
+        let check = std::process::Command::new("cargo")
+            .args(["check", "--quiet"])
+            .current_dir(bridged_crate)
+            .output();
+        let compile_err = match check {
+            Ok(out) if !out.status.success() => {
+                let err_txt = String::from_utf8_lossy(&out.stderr);
+                err_txt.contains("error[") || err_txt.contains("error:")
+            }
+            _ => false,
+        };
+        if compile_err {
             fs::write(&dst_port_path, &dst_port)?;
             let _ = bridge::refresh(bridged_crate);
-            Ok(false)
+            return Ok(false);
         }
     }
+    Ok(true)
 }
 
 /// Promotes a `.fast/ports/<id>` hotspot port into a full `rust/<crate>` unit crate
@@ -1062,16 +1388,12 @@ pub fn go_hotspot(root: &Path, opts: GoHotspotOptions<'_>) -> Result<GoHotspotOu
             continue;
         };
 
-        let mut v = pipeline::agent_port(root, id, agent_spec, opts.attempts)?;
-        if opts.float_tolerance.is_some() && !v.ok() {
-            let vopts = pipeline::VerifyOptions {
-                float_tolerance: opts.float_tolerance,
-                known_diffs: None,
-                min_speedup: opts.min_speedup,
-            };
-            let (_, re_v) = pipeline::verify_with(root, Some(id), &vopts)?;
-            v = re_v;
-        }
+        let vopts = pipeline::VerifyOptions {
+            float_tolerance: opts.float_tolerance,
+            known_diffs: None,
+            min_speedup: opts.min_speedup,
+        };
+        let mut v = pipeline::agent_port_with(root, id, agent_spec, opts.attempts, &vopts)?;
         let mut gate_passed = None;
 
         if v.ok() && opts.strict {
@@ -1084,11 +1406,6 @@ pub fn go_hotspot(root: &Path, opts: GoHotspotOptions<'_>) -> Result<GoHotspotOu
                 );
                 let log = pout.crate_dir.join("gate-fix.log");
                 let _ = fnr_fast::agent::run(agent_spec, &pout.crate_dir, &prompt, &log);
-                let vopts = pipeline::VerifyOptions {
-                    float_tolerance: opts.float_tolerance,
-                    known_diffs: None,
-                    min_speedup: opts.min_speedup,
-                };
                 let (_, re_v) = pipeline::verify_with(root, Some(id), &vopts)?;
                 v = re_v;
                 g = gate_hotspot_port(root, Some(id))?;
@@ -1757,6 +2074,22 @@ pub fn package_hotspot_port(
     package_hotspot_port_with(root, id, out_dir, dry_run, false)
 }
 
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let s = entry.path();
+        let d = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&s, &d)?;
+        } else if ty.is_file() {
+            fs::copy(&s, &d)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn package_hotspot_port_with(
     root: &Path,
     id: Option<&str>,
@@ -1779,9 +2112,18 @@ pub fn package_hotspot_port_with(
     let mut files = vec![lib_name.clone(), "manifest.json".to_string()];
     if matches!(port.lang, FastLang::C | FastLang::Cpp) {
         files.push(format!("{}.h", port.ext));
+        files.push("CMakeLists.txt".to_string());
     } else if port.lang == FastLang::Python {
-        files.push("__init__.py".to_string());
         files.push("pyproject.toml".to_string());
+        files.push("Cargo.toml".to_string());
+        files.push("src/lib.rs".to_string());
+    } else if port.lang == FastLang::Node {
+        files.push("package.json".to_string());
+        files.push("index.cjs".to_string());
+        files.push("index.mjs".to_string());
+        files.push("index.d.ts".to_string());
+        files.push("Cargo.toml".to_string());
+        files.push("src/lib.rs".to_string());
     }
 
     if dry_run {
@@ -1811,27 +2153,113 @@ pub fn package_hotspot_port_with(
     let artifact_dst = dest_dir.join(&lib_name);
     fs::copy(&built, &artifact_dst)?;
 
+    let crate_dir = ctx.crate_dir(&port);
     let hs = ctx.state.hotspots.iter().find(|h| h.id == resolved);
     if matches!(port.lang, FastLang::C | FastLang::Cpp) {
         fs::write(
             dest_dir.join(format!("{}.h", port.ext)),
             c_header_for_port(&port, hs),
         )?;
+        let cmake = format!(
+            "cmake_minimum_required(VERSION 3.16)\n\
+             project({ext}_prebuilt LANGUAGES C)\n\
+             add_library(fnr_{ext} SHARED IMPORTED GLOBAL)\n\
+             add_library(fnr::{ext} ALIAS fnr_{ext})\n\
+             set_target_properties(fnr_{ext} PROPERTIES\n\
+               IMPORTED_LOCATION \"${{CMAKE_CURRENT_LIST_DIR}}/{lib_name}\"\n\
+               INTERFACE_INCLUDE_DIRECTORIES \"${{CMAKE_CURRENT_LIST_DIR}}\"\n\
+             )\n",
+            ext = port.ext
+        );
+        fs::write(dest_dir.join("CMakeLists.txt"), cmake)?;
     } else if port.lang == FastLang::Python {
+        if crate_dir.join("Cargo.toml").is_file() {
+            fs::copy(crate_dir.join("Cargo.toml"), dest_dir.join("Cargo.toml"))?;
+        }
+        if crate_dir.join("Cargo.lock").is_file() {
+            fs::copy(crate_dir.join("Cargo.lock"), dest_dir.join("Cargo.lock"))?;
+        }
+        if crate_dir.join(".cargo/config.toml").is_file() {
+            fs::create_dir_all(dest_dir.join(".cargo"))?;
+            fs::copy(
+                crate_dir.join(".cargo/config.toml"),
+                dest_dir.join(".cargo/config.toml"),
+            )?;
+        }
+        if crate_dir.join("src").is_dir() {
+            copy_dir_recursive(&crate_dir.join("src"), &dest_dir.join("src"))?;
+        }
         fs::write(
-            dest_dir.join("__init__.py"),
+            dest_dir.join("pyproject.toml"),
             format!(
-                "from .{ext} import {func}\n__all__ = [{func:?}]\n",
+                "[build-system]\n\
+                 requires = [\"maturin>=1.7,<2.0\"]\n\
+                 build-backend = \"maturin\"\n\n\
+                 [project]\n\
+                 name = \"{ext}\"\n\
+                 version = \"0.1.0\"\n\
+                 description = \"Rust acceleration for {id} (fast-n-rust)\"\n\
+                 requires-python = \">=3.10\"\n\n\
+                 [tool.maturin]\n\
+                 features = [\"extension-module\"]\n\
+                 profile = \"ship\"\n",
                 ext = port.ext,
+                id = port.id
+            ),
+        )?;
+    } else if port.lang == FastLang::Node {
+        if crate_dir.join("Cargo.toml").is_file() {
+            fs::copy(crate_dir.join("Cargo.toml"), dest_dir.join("Cargo.toml"))?;
+        }
+        if crate_dir.join("Cargo.lock").is_file() {
+            fs::copy(crate_dir.join("Cargo.lock"), dest_dir.join("Cargo.lock"))?;
+        }
+        if crate_dir.join("build.rs").is_file() {
+            fs::copy(crate_dir.join("build.rs"), dest_dir.join("build.rs"))?;
+        }
+        if crate_dir.join("src").is_dir() {
+            copy_dir_recursive(&crate_dir.join("src"), &dest_dir.join("src"))?;
+        }
+        let pkg_json = json!({
+            "name": port.ext,
+            "version": "0.1.0",
+            "description": format!("Rust acceleration for {} (fast-n-rust)", port.id),
+            "main": "./index.cjs",
+            "module": "./index.mjs",
+            "types": "./index.d.ts",
+            "exports": {
+                ".": {
+                    "import": "./index.mjs",
+                    "require": "./index.cjs",
+                    "types": "./index.d.ts"
+                }
+            },
+            "files": [lib_name, "index.cjs", "index.mjs", "index.d.ts", "Cargo.toml", "src/"]
+        });
+        fs::write(
+            dest_dir.join("package.json"),
+            serde_json::to_string_pretty(&pkg_json)?,
+        )?;
+        fs::write(
+            dest_dir.join("index.cjs"),
+            format!("module.exports = require(\"./{lib_name}\");\n"),
+        )?;
+        fs::write(
+            dest_dir.join("index.mjs"),
+            format!(
+                "import {{ createRequire }} from \"node:module\";\n\
+                 const require = createRequire(import.meta.url);\n\
+                 const native = require(\"./{lib_name}\");\n\
+                 export const {func} = native.{func};\n\
+                 export default native;\n",
                 func = port.func
             ),
         )?;
         fs::write(
-            dest_dir.join("pyproject.toml"),
+            dest_dir.join("index.d.ts"),
             format!(
-                "[project]\nname = \"{ext}\"\nversion = \"0.1.0\"\ndescription = \"Rust acceleration for {id} (fast-n-rust)\"\nrequires-python = \">=3.10\"\n",
-                ext = port.ext,
-                id = port.id
+                "export declare function {func}(...args: any[]): any;\n",
+                func = port.func
             ),
         )?;
     }
@@ -2262,6 +2690,8 @@ mod tests {
                 enabled: false,
                 lang: FastLang::C,
                 owner: None,
+                instance_method: false,
+                self_fields: vec![],
                 line: 1,
                 sources: vec![],
                 build_profile: None,
@@ -2372,6 +2802,8 @@ mod tests {
                 enabled: false,
                 lang: FastLang::C,
                 owner: None,
+                instance_method: false,
+                self_fields: vec![],
                 line: 1,
                 sources: vec![],
                 build_profile: None,
@@ -2472,6 +2904,8 @@ mod tests {
                 enabled: true,
                 lang: FastLang::C,
                 owner: None,
+                instance_method: false,
+                self_fields: vec![],
                 line: 1,
                 sources: vec![],
                 build_profile: None,
@@ -2493,5 +2927,44 @@ mod tests {
         assert!(!code_body.contains("unimplemented!"), "{port_rs}");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn splice_c_abi_rejects_fallible_result_into_bare_scalar() {
+        let dst = "pub fn f(x: i32) -> i32 {\n    unimplemented!()\n}\n";
+        let fast_fallible = "pub fn f(x: i32) -> Result<i32, String> {\n    if x < 0 { return Err(\"neg\".into()); }\n    Ok(x)\n}\n";
+        assert!(splice_c_abi_stub(dst, fast_fallible, "f").is_none());
+
+        let fast_ok = "pub fn f(x: i32) -> Result<i32, String> {\n    Ok(x + 1)\n}\n";
+        let spliced = splice_c_abi_stub(dst, fast_ok, "f").unwrap();
+        assert!(!spliced.contains("unwrap_or_default"), "{spliced}");
+        assert!(spliced.contains("panic!(\"fnr: {e}\")"), "{spliced}");
+    }
+
+    #[test]
+    fn splice_native_macro_port_handles_pyo3_and_napi_reference_ports() {
+        let dst_py = "#![forbid(unsafe_code)]\n\npub fn find_duplicates(names: Vec<String>, max_distance: i64) -> Result<Vec<(i64, i64)>, String> {\n    unimplemented!()\n}\n";
+        let fast_py = "//! Reference Python port\n#![allow(unused)]\nuse pyo3::prelude::*;\nstruct Helper;\npub struct InternalCfg { x: i32 }\n#[pyfunction]\n#[pyo3(signature = (names, max_distance = 2))]\nfn find_duplicates(py: Python<'_>, names: Vec<String>, max_distance: i64) -> PyResult<Vec<(i64, i64)>> {\n    let _ = py.detach(|| 1);\n    Ok(vec![(0, max_distance)])\n}\n#[pymodule]\nfn fa_mod(m: &Bound<'_, PyModule>) -> PyResult<()> {\n    m.add_function(wrap_pyfunction!(find_duplicates, m)?)?\n}\n";
+        let spliced_py =
+            splice_native_macro_port(dst_py, fast_py, "find_duplicates", FastLang::Python).unwrap();
+        assert!(!spliced_py.contains("//!"), "{spliced_py}");
+        assert!(spliced_py.contains("__fnr_hotspot_impl::find_duplicates(__fnr_hotspot_impl::DummyPy, names, max_distance)"), "{spliced_py}");
+        assert!(!spliced_py.contains("use pyo3"), "{spliced_py}");
+        assert!(!spliced_py.contains("#[pymodule]"), "{spliced_py}");
+        assert!(
+            spliced_py.contains("pub(super) struct InternalCfg"),
+            "{spliced_py}"
+        );
+
+        let dst_ts = "#![forbid(unsafe_code)]\n\npub fn find_duplicates(names: Vec<String>, max_distance: Option<f64>) -> Result<Vec<Vec<f64>>, String> {\n    unimplemented!()\n}\n";
+        let fast_ts = "//! Reference TS port\nuse napi::bindgen_prelude::*;\nuse napi_derive::napi;\n#[napi(js_name = \"findDuplicates\", catch_unwind)]\npub fn find_duplicates(names: Vec<String>, max_distance: Option<f64>) -> Result<Vec<Vec<f64>>> {\n    Ok(vec![vec![names.len() as f64, max_distance.unwrap_or(2.0)]])\n}\n";
+        let spliced_ts =
+            splice_native_macro_port(dst_ts, fast_ts, "findDuplicates", FastLang::Node).unwrap();
+        assert!(!spliced_ts.contains("//!"), "{spliced_ts}");
+        assert!(
+            spliced_ts.contains("__fnr_hotspot_impl::find_duplicates(names, max_distance)"),
+            "{spliced_ts}"
+        );
+        assert!(!spliced_ts.contains("use napi"), "{spliced_ts}");
     }
 }

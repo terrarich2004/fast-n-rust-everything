@@ -158,15 +158,104 @@ fn entry(args: &[String]) -> Option<&String> {
     None
 }
 
+/// Unwrap `tsx app.ts` or `npx [-y] tsx|ts-node|node app.ts` into `node [--import ...] app.ts`.
+pub fn unwrap_node_runner(command: &[String], root: &Path) -> Option<Vec<String>> {
+    let stem = crate::util::program_stem(command.first()?);
+    let rest: &[String] = if stem == "npx" {
+        let mut slice = &command[1..];
+        while slice.first().is_some_and(|a| a == "-y" || a == "--yes") {
+            slice = &slice[1..];
+        }
+        slice
+    } else {
+        command
+    };
+    let tool = crate::util::program_stem(rest.first()?);
+    let tail_args = &rest[1..];
+    if matches!(tool.as_str(), "node" | "nodejs") && stem == "npx" && !tail_args.is_empty() {
+        return Some(
+            std::iter::once("node".to_string())
+                .chain(tail_args.iter().cloned())
+                .collect(),
+        );
+    }
+    if tool == "tsx" && !tail_args.is_empty() {
+        let resolved = Command::new("node")
+            .args(["-e", "console.log(import.meta.resolve('tsx'))"])
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut out = vec!["node".to_string()];
+        if let Some(loader_url) = resolved {
+            out.push("--import".into());
+            out.push(loader_url);
+        }
+        out.extend(tail_args.iter().cloned());
+        return Some(out);
+    }
+    None
+}
+
+/// Extract loader/import flags before the entry script (e.g. `--import ...`) so `verify`/`fuzz`
+/// can load TypeScript files with the same module hooks as `scan`.
+fn passthrough_flags(args: &[String]) -> Vec<String> {
+    let args = if args.first().is_some_and(|a| a == "run") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut flags = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if matches!(
+            a.as_str(),
+            "-r" | "--require"
+                | "--import"
+                | "--loader"
+                | "--experimental-loader"
+                | "-C"
+                | "--conditions"
+        ) {
+            flags.push(a.clone());
+            if let Some(v) = it.next() {
+                flags.push(v.clone());
+            }
+        } else if a.starts_with("--import=")
+            || a.starts_with("--loader=")
+            || a.starts_with("--conditions=")
+            || a.starts_with("--require=")
+        {
+            flags.push(a.clone());
+        } else if !a.starts_with('-') {
+            break;
+        }
+    }
+    flags
+}
+
 fn runner(ctx: &Ctx, node: &str, mode: &str, job: Value) -> Result<Output> {
     let script = ctx.fast.join("runner.mjs");
     fs::write(&script, RUNNER)?;
     let job_path = ctx.fast.join(format!("job-{mode}.json"));
     fs::write(&job_path, serde_json::to_vec_pretty(&job)?)?;
     let runtime = runtime_of(node);
+    let mut cmd = Command::new(node);
+    let extra = if mode != "profile" && ctx.state.command.len() > 1 {
+        passthrough_flags(&ctx.state.command[1..])
+    } else {
+        Vec::new()
+    };
+    let mut argv = runtime.script(&script);
+    if !extra.is_empty() && runtime == Runtime::Node {
+        let mut combined_argv = extra;
+        combined_argv.extend(argv);
+        argv = combined_argv;
+    }
     let out = output(
-        Command::new(node)
-            .args(runtime.script(&script))
+        cmd.args(argv)
             .arg(mode)
             .arg(&job_path)
             .current_dir(&ctx.root)
@@ -256,7 +345,7 @@ pub fn record(
     let backup = backup_dir.join(slug(&hs.file));
     fs::write(&backup, &original)?;
 
-    let f = &target(&hs.name, hs.owner.as_deref());
+    let f = &target(&hs.name, hs.owner.as_deref(), hs.instance_method);
     let wrap =
         format!("{f} = globalThis.__fastAnythingWrap ? globalThis.__fastAnythingWrap({f}) : {f};");
     let entry = hs.module.as_deref() == Some("__main__");
@@ -287,17 +376,23 @@ pub fn record(
                 .filter(|f| !given(f)),
         );
     }
-    let run = output(
-        Command::new(node)
-            .args(runtime.with(&options, args))
-            .current_dir(&ctx.root)
-            .env("FAST_ANYTHING_RECORD_OUT", out)
-            .env("FAST_ANYTHING_RECORD_META", &meta)
-            .env("FAST_ANYTHING_RECORD_LIMIT", limit.to_string())
-            .env(DISABLE_ENV, "1")
-            .stdin(Stdio::null()),
-        runtime.name(),
-    );
+    let mut cmd = Command::new(node);
+    cmd.args(runtime.with(&options, args))
+        .current_dir(&ctx.root)
+        .env("FAST_ANYTHING_RECORD_OUT", out)
+        .env("FAST_ANYTHING_RECORD_META", &meta)
+        .env("FAST_ANYTHING_RECORD_LIMIT", limit.to_string())
+        .env(DISABLE_ENV, "1")
+        .stdin(Stdio::null());
+    if hs.instance_method {
+        cmd.env(
+            "FAST_ANYTHING_SELF_FIELDS",
+            serde_json::to_string(&hs.self_fields)?,
+        );
+    } else {
+        cmd.env_remove("FAST_ANYTHING_SELF_FIELDS");
+    }
+    let run = output(&mut cmd, runtime.name());
     fs::write(&file, &original)
         .with_context(|| format!("restoring {} (a copy is in {})", hs.file, backup.display()))?;
     let _ = fs::remove_file(&backup);
@@ -578,11 +673,26 @@ pub fn task_md(hs: &Hotspot, helpers: &[Hotspot], port: &Port, crate_dir: &Path)
         "js"
     };
     let samples = sample_calls(&crate_dir.join("recordings.jsonl"), &hs.name, 8).join("\n");
-    let notes: String = hs
+    let mut notes: String = hs
         .warnings
         .iter()
         .map(|w| format!("- Note: {w}.\n"))
         .collect();
+    if hs.instance_method {
+        let fields = if hs.self_fields.is_empty() {
+            "no `this` fields".to_string()
+        } else {
+            hs.self_fields
+                .iter()
+                .map(|f| format!("`this.{f}` -> `this_{f}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        notes.push_str(&format!(
+            "- Note: `{}` is a read-only instance method; lifted {fields}.\n",
+            hs.qualname
+        ));
+    }
     format!(
         "# Port `{id}` to Rust\n\n\
 You're in a Rust crate (napi-rs) fast-n-rust (`fnr`) generated for this: `{dir}`.\n\
@@ -672,6 +782,9 @@ pub fn verify_with(
         "addon": ctx.lib_dir().join(format!("{}.node", port.ext)),
         "js_name": port.func,
         "func": port.func,
+        "owner": port.owner,
+        "instance_method": port.instance_method,
+        "self_fields": port.self_fields,
         "module_file": ctx.root.join(&port.file),
         "cases": dir.join("recordings.jsonl"),
         "out": out,
@@ -685,7 +798,7 @@ pub fn verify_with(
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
     let hand_over = format!(
         "if (globalThis.__fastAnythingOriginal) globalThis.__fastAnythingOriginal({});",
-        target(&port.func, port.owner.as_deref())
+        target(&port.func, port.owner.as_deref(), port.instance_method)
     );
     let mut patches = crate::native::Patches::new(ctx)?;
     patches.write(
@@ -713,12 +826,15 @@ pub fn fuzz_cases(
     let text = fs::read_to_string(&file).with_context(|| format!("reading {}", port.file))?;
     let hand_over = format!(
         "if (globalThis.__fastAnythingOriginal) globalThis.__fastAnythingOriginal({});",
-        target(&port.func, port.owner.as_deref())
+        target(&port.func, port.owner.as_deref(), port.instance_method)
     );
     let job = json!({
         "addon": ctx.lib_dir().join(format!("{}.node", port.ext)),
         "js_name": port.func,
         "func": port.func,
+        "owner": port.owner,
+        "instance_method": port.instance_method,
+        "self_fields": port.self_fields,
         "module_file": file,
         "cases": cases_path,
         "out": out_path,
@@ -760,29 +876,85 @@ fn is_esm(root: &Path, file: &Path) -> bool {
     false
 }
 
-/// How the module refers to the function: its name, or Class.name for a static method.
-fn target(name: &str, owner: Option<&str>) -> String {
-    owner.map_or_else(|| name.to_string(), |class| format!("{class}.{name}"))
+/// How the module refers to the function: its name, Class.name for a static method, or Class.prototype.name for an instance method.
+fn target(name: &str, owner: Option<&str>, instance_method: bool) -> String {
+    match (owner, instance_method) {
+        (Some(class), true) => format!("{class}.prototype.{name}"),
+        (Some(class), false) => format!("{class}.{name}"),
+        (None, _) => name.to_string(),
+    }
 }
 
 pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
-    let load = if esm {
-        format!(
-            "process.getBuiltinModule(\"node:module\").createRequire(import.meta.url)(\"{addon_rel}\")"
+    let addon_name = addon_rel.rsplit('/').next().unwrap_or(addon_rel);
+    let target_expr = target(&port.func, port.owner.as_deref(), port.instance_method);
+    let (load_default, load_override) = if esm {
+        (
+            format!(
+                "process.getBuiltinModule(\"node:module\").createRequire(import.meta.url)(\"{addon_rel}\").{}",
+                port.func
+            ),
+            format!(
+                "process.getBuiltinModule(\"node:module\").createRequire(import.meta.url)(process.getBuiltinModule(\"node:path\").join(process.env.FNR_LIB_DIR, \"{addon_name}\")).{}",
+                port.func
+            ),
         )
     } else {
-        format!("require(\"{addon_rel}\")")
+        (
+            format!("require(\"{addon_rel}\").{}", port.func),
+            format!(
+                "require(require(\"node:path\").join(process.env.FNR_LIB_DIR, \"{addon_name}\")).{}",
+                port.func
+            ),
+        )
     };
-    [
+    let assign_lines = if port.instance_method {
+        let field_args = port
+            .self_fields
+            .iter()
+            .map(|f| format!("this.{f}"))
+            .collect::<Vec<_>>();
+        let call_args = if field_args.is_empty() {
+            "..._args".to_string()
+        } else {
+            format!("{}, ..._args", field_args.join(", "))
+        };
+        vec![
+            format!(
+                "    const _fnrFn = process.env.FNR_LIB_DIR ? {load_override} : {load_default};"
+            ),
+            format!("    {target_expr} = function (..._args) {{"),
+            format!("      return _fnrFn({call_args});"),
+            "    };".to_string(),
+        ]
+    } else {
+        vec![
+            "    if (process.env.FNR_LIB_DIR) {".to_string(),
+            format!("      {target_expr} = {load_override};"),
+            "    } else {".to_string(),
+            format!("      {target_expr} = {load_default};"),
+            "    }".to_string(),
+        ]
+    };
+    let mut lines = vec![
         "// Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the JavaScript above instead.".to_string(),
         format!("// Undo with:  fnr disable {}", port.id),
         "if (!process.env.FNR_DISABLE && !process.env.FAST_ANYTHING_DISABLE) {".to_string(),
         "  try {".to_string(),
-        format!("    {} = {load}.{};", target(&port.func, port.owner.as_deref()), port.func),
-        "  } catch {}".to_string(),
+    ];
+    lines.extend(assign_lines);
+    lines.extend([
+        "  } catch (_err) {".to_string(),
+        "    if (process.env.FNR_STRICT === \"1\" || process.env.FNR_STRICT === \"true\") {".to_string(),
+        format!(
+            "      throw new Error(\"fnr: FNR_STRICT=1 and Rust port {} ({addon_name}) could not be loaded: \" + (_err && _err.message || _err));",
+            port.id
+        ),
+        "    }".to_string(),
+        "  }".to_string(),
         "}".to_string(),
-    ]
-    .join("\n")
+    ]);
+    lines.join("\n")
 }
 
 pub fn enable(ctx: &Ctx, port: &Port) -> Result<()> {
@@ -1094,6 +1266,8 @@ mod tests {
             enabled: false,
             lang: backend::Lang::Node,
             owner: None,
+            instance_method: false,
+            self_fields: vec![],
             line: 1,
             sources: vec![],
             build_profile: None,
@@ -1143,6 +1317,8 @@ mod tests {
             enabled: false,
             lang: backend::Lang::Node,
             owner: Some("Text".into()),
+            instance_method: false,
+            self_fields: vec![],
             line: 2,
             sources: vec![],
             build_profile: None,
@@ -1176,6 +1352,8 @@ mod tests {
             enabled: false,
             lang: backend::Lang::Node,
             owner: None,
+            instance_method: false,
+            self_fields: vec![],
             line: 1,
             sources: vec![],
             build_profile: None,

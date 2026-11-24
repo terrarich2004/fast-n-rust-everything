@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const out = process.env.FAST_ANYTHING_RECORD_OUT;
 const meta = process.env.FAST_ANYTHING_RECORD_META;
 const limit = Number(process.env.FAST_ANYTHING_RECORD_LIMIT || 500);
+const selfFields = process.env.FAST_ANYTHING_SELF_FIELDS ? JSON.parse(process.env.FAST_ANYTHING_SELF_FIELDS) : null;
 const kept = [];
 const unsupported = new Set();
 let mutates = false;
@@ -42,10 +43,11 @@ globalThis.__fastAnythingWrap = (fn) =>
   function (...args) {
     calls++;
     const slot = kept.length < limit ? kept.length : rand(calls);
+    const flatArgs = () => (Array.isArray(selfFields) ? [...selfFields.map((f) => this?.[f]), ...args] : args);
     let c = null;
     if (slot < limit) {
       try {
-        c = { args: args.map(enc) };
+        c = { args: flatArgs().map(enc) };
       } catch (e) {
         skipped++;
         unsupported.add(e.message);
@@ -63,7 +65,7 @@ globalThis.__fastAnythingWrap = (fn) =>
     }
     if (c) {
       try {
-        if (JSON.stringify(args.map(enc)) !== JSON.stringify(c.args)) mutates = true;
+        if (JSON.stringify(flatArgs().map(enc)) !== JSON.stringify(c.args)) mutates = true;
       } catch {}
       try {
         c.result = enc(result);

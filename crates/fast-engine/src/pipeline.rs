@@ -35,7 +35,17 @@ pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
             ));
             unwrapped
         }
-        None => command,
+        None => match crate::node::unwrap_node_runner(&command, &ctx.root) {
+            Some(unwrapped) => {
+                ui::step(format!(
+                    "{} runs {}",
+                    ui::bold(&command[0]),
+                    ui::bold(unwrapped.join(" "))
+                ));
+                unwrapped
+            }
+            None => command,
+        },
     };
     let lang = crate::cfamily::refine(Lang::detect(&command[0])?, &command[1..]);
     let lang = crate::kotlin::refine(lang, &command[0], &ctx.root);
@@ -186,6 +196,8 @@ pub fn port(root: &Path, id: Option<&str>, samples: usize) -> Result<PortOut> {
         enabled,
         lang,
         owner: hs.owner.clone(),
+        instance_method: hs.instance_method,
+        self_fields: hs.self_fields.clone(),
         line: hs.line,
         sources: crate::state::verbatim(&text, &sources),
         build_profile: None,
@@ -505,6 +517,65 @@ pub fn build_all(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Compile every `.fast/ports/*` crate using the `Ship` LTO profile directly into `.fast/lib/`,
+/// without requiring `.fast/state.json` or `recordings.jsonl` (for Docker/CI deploy builds).
+pub fn build_deploy(root: &Path, native_cpu: bool) -> Result<Vec<PathBuf>> {
+    let ctx = Ctx::open(root)?;
+    let mut targets: Vec<Port> = Vec::new();
+    let mut seen_dirs = std::collections::HashSet::<PathBuf>::new();
+
+    for port in ctx.state.ports.values() {
+        let dir = ctx.crate_dir(port);
+        if dir.join("Cargo.toml").is_file() {
+            let key = fs::canonicalize(&dir).unwrap_or(dir);
+            seen_dirs.insert(key);
+            targets.push(port.clone());
+        }
+    }
+
+    let ports_dir = ctx.fast.join("ports");
+    if ports_dir.is_dir() {
+        let mut entries: Vec<PathBuf> = fs::read_dir(&ports_dir)?
+            .filter_map(|e| e.ok().map(|x| x.path()))
+            .filter(|p| p.is_dir() && p.join("Cargo.toml").is_file())
+            .collect();
+        entries.sort();
+        for dir in entries {
+            let key = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            if seen_dirs.insert(key) {
+                targets.push(backend::infer_port_from_manifest(&ctx.root, &dir)?);
+            }
+        }
+    }
+
+    ensure!(
+        !targets.is_empty(),
+        "no .fast/ports/*/Cargo.toml crates found to build"
+    );
+
+    let mut built = Vec::new();
+    let mut failed = 0usize;
+    let opts = backend::BuildOptions {
+        profile: backend::BuildProfile::Ship,
+        native_cpu,
+    };
+    for port in &targets {
+        ui::step(format!("deploy-building {} (ship)", ui::bold(&port.ext)));
+        match backend::build_with_options(&ctx, port, opts)? {
+            Ok(path) => {
+                ui::ok(format!("{}", path.display()));
+                built.push(path);
+            }
+            Err(log) => {
+                failed += 1;
+                ui::error(format!("{} doesn't compile:\n{log}", port.id));
+            }
+        }
+    }
+    ensure!(failed == 0, "{failed} port(s) didn't build");
+    Ok(built)
+}
+
 pub fn bench(root: &Path, runs: usize) -> Result<BenchResult> {
     let mut ctx = Ctx::open(root)?;
     for p in ctx
@@ -532,6 +603,16 @@ pub fn report(root: &Path) -> Result<ReportOut> {
 
 /// What the agent gets told after a failed attempt, or a right one that's slower than the original.
 pub fn feedback(v: &Verify) -> String {
+    feedback_with(v, &VerifyOptions::default())
+}
+
+/// What the agent gets told after a failed attempt, or a right one that is slower / below `--min-speedup`.
+pub fn feedback_with(v: &Verify, opts: &VerifyOptions) -> String {
+    let target_file = if v.lang.c_bridge() {
+        "src/port.rs"
+    } else {
+        "src/lib.rs"
+    };
     if v.ok()
         && let Some(m) = v.micro.filter(|_| v.slower())
     {
@@ -546,16 +627,22 @@ pub fn feedback(v: &Verify) -> String {
         };
         return format!(
             "\n\n## Your last attempt is right but slow\n\n\
-             All {} cases match, but a call takes {} in Rust against {} in the original ({} slower) on a {cores}-core host.{ffi_note}\n{}",
+             All {} cases match, but a call takes {} in Rust against {} in the original ({} slower) on a {cores}-core host.{ffi_note}\n\nFix {target_file}.\n",
             v.total,
             util::nanos(m.rust_ns),
             util::nanos(m.original_ns),
             util::times(1.0 / m.speedup),
-            if v.lang.c_bridge() {
-                "\nFix src/port.rs.\n"
-            } else {
-                "\nFix src/lib.rs.\n"
-            }
+        );
+    }
+    if v.ok()
+        && v.below_min_speedup(opts.min_speedup)
+        && let (Some(min), Some(m)) = (opts.min_speedup, v.micro)
+    {
+        return format!(
+            "\n\n## Your last attempt is right but below --min-speedup\n\n\
+             It matched all {} calls ({} per call), which is below the required --min-speedup {min:.2}x. Avoid per-call allocations/clones and tighten inner loops in {target_file}.\n",
+            v.total,
+            util::times(m.speedup),
         );
     }
     let mut out = String::from("\n\n## Your last attempt failed\n\n");
@@ -575,15 +662,21 @@ pub fn feedback(v: &Verify) -> String {
             ));
         }
     }
-    out.push_str(if v.lang.c_bridge() {
-        "\nFix src/port.rs.\n"
-    } else {
-        "\nFix src/lib.rs.\n"
-    });
+    out.push_str(&format!("\nFix {target_file}.\n"));
     out
 }
 
 pub fn agent_port(root: &Path, id: &str, agent_spec: &str, attempts: usize) -> Result<Verify> {
+    agent_port_with(root, id, agent_spec, attempts, &VerifyOptions::default())
+}
+
+pub fn agent_port_with(
+    root: &Path,
+    id: &str,
+    agent_spec: &str,
+    attempts: usize,
+    opts: &VerifyOptions,
+) -> Result<Verify> {
     let attempts = attempts.max(1);
     let mut last: Option<Verify> = None;
     // A port that's right but slower goes back to the agent to speed up; if no later attempt is both
@@ -600,16 +693,16 @@ pub fn agent_port(root: &Path, id: &str, agent_spec: &str, attempts: usize) -> R
         let dir = ctx.crate_dir(&port);
         let mut prompt = fs::read_to_string(dir.join("TASK.md")).context("reading TASK.md")?;
         if let Some(v) = &last {
-            prompt.push_str(&feedback(v));
+            prompt.push_str(&feedback_with(v, opts));
         }
         ui::step(format!(
             "{} is writing the Rust port (attempt {attempt}/{attempts})",
             ui::bold(agent_spec)
         ));
         agent::run(agent_spec, &dir, &prompt, &dir.join("agent.log"))?;
-        let (_, v) = verify(root, Some(id))?;
+        let (_, v) = verify_with(root, Some(id), opts)?;
         show::verify(id, &v);
-        if v.ok() && !v.slower() {
+        if v.ok() && !v.slower() && !v.below_min_speedup(opts.min_speedup) {
             return Ok(v);
         }
         if v.ok()
@@ -637,7 +730,7 @@ pub fn agent_port(root: &Path, id: &str, agent_spec: &str, attempts: usize) -> R
             .get(id)
             .with_context(|| format!("{id} isn't ported"))?;
         restore_snapshot(&ctx.crate_dir(port), &files)?;
-        let (_, v) = verify(root, Some(id))?;
+        let (_, v) = verify_with(root, Some(id), opts)?;
         return Ok(v);
     }
     Ok(last.unwrap_or_default())
@@ -824,11 +917,36 @@ mod tests {
             enabled: false,
             lang: Lang::Python,
             owner: None,
+            instance_method: false,
+            self_fields: vec![],
             line: 1,
             sources: vec![],
             build_profile: None,
         };
         (root, port)
+    }
+
+    #[test]
+    fn feedback_with_reports_below_min_speedup() {
+        let v = Verify {
+            built: true,
+            total: 10,
+            passed: 10,
+            micro: Some(Micro {
+                original_ns: 200.0,
+                rust_ns: 100.0,
+                speedup: 2.0,
+                ..Micro::default()
+            }),
+            ..Verify::default()
+        };
+        let opts = VerifyOptions {
+            min_speedup: Some(5.0),
+            ..VerifyOptions::default()
+        };
+        let text = feedback_with(&v, &opts);
+        assert!(text.contains("--min-speedup"), "{text}");
+        assert!(text.contains("5.00x"), "{text}");
     }
 
     #[test]
@@ -958,6 +1076,8 @@ mod tests {
             enabled: true,
             lang: Lang::Python,
             owner: None,
+            instance_method: false,
+            self_fields: vec![],
             line: 1,
             sources: vec![],
             build_profile: None,

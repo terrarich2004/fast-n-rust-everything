@@ -46,8 +46,14 @@ pub struct Hotspot {
     /// and saves a Python/JS -> Rust crossing per call.
     pub covered_by: Option<String>,
     /// Ruby: the module (or Object) whose method this is, as a Ruby expression.
-    /// Python: the class of a @staticmethod.
+    /// Python/TS: the class of a @staticmethod or read-only instance method.
     pub owner: Option<String>,
+    /// True when this hotspot is an instance method whose read-only `self`/`this` fields are lifted as arguments.
+    #[serde(default)]
+    pub instance_method: bool,
+    /// Names of read-only `self.<field>` / `this.<field>` attributes lifted as leading parameters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub self_fields: Vec<String>,
     /// Python: dataclasses and NamedTuples from the same file that the signature uses, with their fields.
     pub records: std::collections::BTreeMap<String, Vec<Param>>,
 }
