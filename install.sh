@@ -91,7 +91,11 @@ fi
 tar -xzf "${TMP_DIR}/${ASSET}" -C "$TMP_DIR"
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "${TMP_DIR}/fast-n-rust" "${INSTALL_DIR}/fast-n-rust"
-install -m 0755 "${TMP_DIR}/fnr" "${INSTALL_DIR}/fnr"
+if [ -f "${TMP_DIR}/fnr" ]; then
+  install -m 0755 "${TMP_DIR}/fnr" "${INSTALL_DIR}/fnr"
+else
+  ln -sf fast-n-rust "${INSTALL_DIR}/fnr" || cp -f "${INSTALL_DIR}/fast-n-rust" "${INSTALL_DIR}/fnr"
+fi
 
 echo "Installed fast-n-rust and fnr to ${INSTALL_DIR}"
 case ":${PATH}:" in

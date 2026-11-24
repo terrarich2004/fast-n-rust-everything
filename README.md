@@ -90,7 +90,8 @@ fnr fuzz --cases 100 --save-regressions          # differential/property fuzz + 
 fnr enable                                         # portable Ship LTO (add `--native-cpu` or `--pgo`) & swap
 fnr bench && fnr status && fnr report              # interleaved 95% CI + peak RSS benchmark, matrix status & SVG card
 fnr ci --fuzz 50 --bench --min-speedup 2.0         # one-shot CI parity/lint/fuzz/speedup gate
-fnr package                                        # ship `.fast/` port into `dist/` with C header or Python pkg
+fnr build --deploy                                 # compile committed `.fast/ports/*` in Docker/CI (no state.json needed)
+fnr package                                        # ship `.fast/` port into `dist/` (maturin / npm / CMake)
 ```
 
 ### Measured E2E Benchmarks (Linux x86_64, Ryzen 7 4800HS)
@@ -129,10 +130,11 @@ fnr app wire . <unit> --command <name>
 fnr app lift .
 ```
 
-### Instant Kill Switches (Zero-Risk Rollback)
+### Instant Kill Switches & Strict Deployment (Zero-Risk Rollback)
 
 - Hotspot swap: `FNR_DISABLE=1` (also honors `FAST_ANYTHING_DISABLE=1`), or `fnr disable --all`
 - Unit / shadow swap: `RUST_ANYTHING_MODE=old` or `RUST_ANYTHING_UNIT_<NAME>=original` or `FNR_DISABLE=1`
+- Production / CI guards: `FNR_STRICT=1` fails fast if a compiled port cannot be loaded (instead of silently falling back); `FNR_LIB_DIR=/path/to/libs` overrides `.fast/lib` lookup; `fnr build --deploy` builds `.fast/ports/*` in clean Docker/CI checkouts without `.fast/state.json`.
 
 ## Languages
 

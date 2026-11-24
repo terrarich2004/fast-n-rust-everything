@@ -54,8 +54,20 @@ try {
   $Stage = Join-Path $TmpDir "stage"
   Expand-Archive -Path $ArchivePath -DestinationPath $Stage -Force
   New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-  Copy-Item (Join-Path $Stage "fast-n-rust.exe") (Join-Path $InstallDir "fast-n-rust.exe") -Force
-  Copy-Item (Join-Path $Stage "fnr.exe") (Join-Path $InstallDir "fnr.exe") -Force
+  $MainExe = Join-Path $InstallDir "fast-n-rust.exe"
+  $AliasExe = Join-Path $InstallDir "fnr.exe"
+  Copy-Item (Join-Path $Stage "fast-n-rust.exe") $MainExe -Force
+  $StageAlias = Join-Path $Stage "fnr.exe"
+  if (Test-Path $StageAlias) {
+    Copy-Item $StageAlias $AliasExe -Force
+  } else {
+    try {
+      if (Test-Path $AliasExe) { Remove-Item $AliasExe -Force }
+      New-Item -ItemType HardLink -Path $AliasExe -Target $MainExe | Out-Null
+    } catch {
+      Copy-Item $MainExe $AliasExe -Force
+    }
+  }
 
   Write-Host "Installed fast-n-rust.exe and fnr.exe to $InstallDir"
   if ($env:PATH -notlike "*$InstallDir*") {

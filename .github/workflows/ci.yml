@@ -28,7 +28,7 @@ jobs:
         run: cargo test --workspace
 
   python-e2e:
-    name: Live E2E (Python fuzzy-dedupe)
+    name: Live E2E (Python, Node/TS, C + deploy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,10 +38,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: Swatinem/rust-cache@v2
       - name: Build fnr
         run: cargo build --bin fnr
-      - name: Run full 5% hotspot loop on temp copy
+      - name: Run Python E2E + package + relocate deploy build
         run: |
           WORK=$(mktemp -d)
           cp -r examples/fuzzy-dedupe "$WORK/app"
@@ -52,8 +55,43 @@ jobs:
           "$FNR" -C "$WORK/app" verify --gate
           "$FNR" -C "$WORK/app" fuzz --cases 20
           "$FNR" -C "$WORK/app" enable
+          "$FNR" -C "$WORK/app" package
+          grep -q 'build-backend = "maturin"' "$WORK/app/dist/"*/pyproject.toml
           "$FNR" -C "$WORK/app" bench --runs 3
+          # Simulate clean checkout / Docker move: wipe state.json and .fast/lib, relocate, rebuild with --deploy
+          mv "$WORK/app" "$WORK/deployed"
+          rm -rf "$WORK/deployed/.fast/lib" "$WORK/deployed/.fast/state.json"
+          ! FNR_STRICT=1 python3 "$WORK/deployed/app.py" >/dev/null 2>&1
+          "$FNR" -C "$WORK/deployed" build --deploy
+          FNR_STRICT=1 python3 "$WORK/deployed/app.py"
+          rm -rf "$WORK"
+      - name: Run Node/TS E2E (fuzzy-dedupe-ts)
+        run: |
+          WORK=$(mktemp -d)
+          cp -r examples/fuzzy-dedupe-ts "$WORK/app"
+          FNR="$PWD/target/debug/fnr"
+          "$FNR" -C "$WORK/app" scan -- node app.ts
+          "$FNR" -C "$WORK/app" port
+          cp "$WORK/app/reference/lib.rs" "$WORK/app/.fast/ports/"*/src/lib.rs
+          "$FNR" -C "$WORK/app" verify --gate
+          "$FNR" -C "$WORK/app" enable
+          FNR_STRICT=1 node "$WORK/app/app.ts"
           "$FNR" -C "$WORK/app" disable
+          rm -rf "$WORK"
+      - name: Run C E2E (mandelbrot-c portable shim)
+        run: |
+          WORK=$(mktemp -d)
+          cp -r examples/mandelbrot-c "$WORK/app"
+          FNR="$PWD/target/debug/fnr"
+          "$FNR" -C "$WORK/app" scan -- clang -O2 main.c mandelbrot.c
+          "$FNR" -C "$WORK/app" port
+          cp "$WORK/app/reference/port.rs" "$WORK/app/.fast/ports/"*/src/port.rs
+          "$FNR" -C "$WORK/app" verify --gate
+          "$FNR" -C "$WORK/app" enable
+          ! grep -q "$WORK" "$WORK/app/mandelbrot.c"
+          (cd "$WORK/app" && clang -O2 main.c mandelbrot.c -lm -ldl -o app_bin)
+          mv "$WORK/app" "$WORK/moved"
+          (cd "$WORK/moved" && FNR_STRICT=1 ./app_bin)
           rm -rf "$WORK"
 
   node-launcher:

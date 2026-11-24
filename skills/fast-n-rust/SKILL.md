@@ -20,12 +20,13 @@ Use **fast-n-rust** to speed up hot code or incrementally rewrite an app into pu
      - A tiny function called in a tight loop crosses FFI per call and will be slower unless you port its outer caller or escalate to `--batch`.
    - Run `fnr port <id>` (or `fnr go --agent <agent> -- <cmd>`): records up to 500 real calls + shrunk/edge cases, creates `.fast/ports/<id>/` with risk + Performance Blueprint `TASK.md` and `tests/recorded_parity.rs` (`cargo test` works directly on native crates).
    - Write the Rust in `src/lib.rs` (or `src/port.rs` for C-bridge languages).
-   - Run `fnr verify <id> --gate` (`--float-tolerance`, `known-diffs.jsonl`, `--min-speedup`), `fnr fuzz <id> --save-regressions` (differential oracle + automatic shrinking), then `fnr enable <id>` (add `--native-cpu` for host SIMD or `--pgo` only when benchmarked faster) and `fnr bench` / `fnr status` (or `fnr ci --fuzz 50 --bench --min-speedup 2.0` / `fnr package <id>`).
-   - Reversible any time via `fnr disable <id>` or `FNR_DISABLE=1` (`FAST_ANYTHING_DISABLE=1`).
+   - Run `fnr verify <id> --gate` (`--float-tolerance`, `known-diffs.jsonl`, `--min-speedup`), `fnr fuzz <id> --save-regressions` (differential oracle + automatic shrinking), then `fnr enable <id>` (add `--native-cpu` for host SIMD or `--pgo` only when benchmarked faster) and `fnr bench` / `fnr status` (or `fnr ci --fuzz 50 --bench --min-speedup 2.0` / `fnr package <id>` / `fnr build --deploy` in Docker/CI).
+   - Reversible any time via `fnr disable <id>` or `FNR_DISABLE=1` (`FAST_ANYTHING_DISABLE=1`). Use `FNR_STRICT=1` in CI/staging to fail fast if the compiled port is missing, and `FNR_LIB_DIR` to override `.fast/lib`.
+   - Read-only Python (`self.<attr>`) and JS/TS (`this.<attr>`) instance methods and `tsx` / `npx` launchers are supported automatically.
 
 2. **Hot loop / multi-core `--batch` / strict parity / shadow rollout (`escalate` & deep units)**:
    - Read [unit-porting.md](unit-porting.md) first.
-   - Promote a hotspot with `fnr escalate <id> [--batch fn:param]` (automatically disables active inline patches and auto-splices compatible C/FFI `src/port.rs` code) or scaffold directly with `fnr bridge <repo> <unit-id>`.
+   - Promote a hotspot with `fnr escalate <id> [--batch fn:param]` (automatically disables active inline patches and auto-splices compatible C/FFI, PyO3, and napi-rs ports into `src/port.rs`) or scaffold directly with `fnr bridge <repo> <unit-id>`.
 
 3. **Whole app to pure Rust (CLIs, HTTP servers, libraries)**:
    - Read [whole-app.md](whole-app.md) and [unit-porting.md](unit-porting.md) first, then follow:

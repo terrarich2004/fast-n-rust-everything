@@ -42,10 +42,10 @@ jobs:
         if: matrix.cross
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       - uses: Swatinem/rust-cache@v2
-      - name: Build release binaries
+      - name: Build release binary
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target ${{ matrix.target }} --bin fast-n-rust --bin fnr
+        run: cargo build --release --target ${{ matrix.target }} --bin fast-n-rust
       - name: Package archive
         shell: bash
         run: |
@@ -54,11 +54,9 @@ jobs:
           mkdir -p dist/stage
           if [ "${{ matrix.ext }}" = "zip" ]; then
             cp "target/${{ matrix.target }}/release/fast-n-rust.exe" dist/stage/
-            cp "target/${{ matrix.target }}/release/fnr.exe" dist/stage/
             7z a "dist/${NAME}.zip" ./dist/stage/*
           else
             cp "target/${{ matrix.target }}/release/fast-n-rust" dist/stage/
-            cp "target/${{ matrix.target }}/release/fnr" dist/stage/
             tar -czf "dist/${NAME}.tar.gz" -C dist/stage .
           fi
       - uses: actions/upload-artifact@v4
