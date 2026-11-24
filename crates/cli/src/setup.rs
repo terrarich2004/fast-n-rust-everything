@@ -105,35 +105,71 @@ fn detected(home: &Path, agent: Agent) -> bool {
     home.join(dir).exists() || agent.config(home).exists() || on_path(bin)
 }
 
-pub fn agent_status(home: &Path, agent: Agent, _exe: &Path) -> (bool, bool) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentStatus {
+    pub detected: bool,
+    pub mcp_configured: bool,
+    pub skill_configured: Option<bool>,
+    pub mcp_command: Option<String>,
+}
+
+pub fn agent_detail(home: &Path, agent: Agent) -> AgentStatus {
     let det = detected(home, agent);
     let cfg = agent.config(home);
-    let configured = if cfg.is_file() {
+    let mcp_command = if cfg.is_file() {
         let text = std::fs::read_to_string(&cfg).unwrap_or_default();
         match agent {
-            Agent::Codex => text
-                .parse::<toml_edit::DocumentMut>()
-                .ok()
-                .and_then(|doc| {
-                    doc.get("mcp_servers")?
-                        .as_table_like()?
-                        .get(NAME)
-                        .map(|_| true)
-                })
-                .unwrap_or(false),
-            Agent::OpenCode => serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v.get("mcp")?.as_object()?.get(NAME).map(|_| true))
-                .unwrap_or(false),
-            _ => serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| v.get("mcpServers")?.as_object()?.get(NAME).map(|_| true))
-                .unwrap_or(false),
+            Agent::Codex => text.parse::<toml_edit::DocumentMut>().ok().and_then(|doc| {
+                doc.get("mcp_servers")?
+                    .as_table_like()?
+                    .get(NAME)?
+                    .as_table_like()?
+                    .get("command")?
+                    .as_str()
+                    .map(str::to_string)
+            }),
+            Agent::OpenCode => serde_json::from_str::<Value>(&text).ok().and_then(|v| {
+                v.get("mcp")?
+                    .as_object()?
+                    .get(NAME)?
+                    .get("command")?
+                    .as_array()?
+                    .first()?
+                    .as_str()
+                    .map(str::to_string)
+            }),
+            _ => serde_json::from_str::<Value>(&text).ok().and_then(|v| {
+                v.get("mcpServers")?
+                    .as_object()?
+                    .get(NAME)?
+                    .get("command")?
+                    .as_str()
+                    .map(str::to_string)
+            }),
         }
     } else {
-        false
+        None
     };
-    (det, configured)
+    let mcp_configured = mcp_command.is_some();
+    let skill_configured = agent.skill_dir(home).map(|sdir| {
+        SKILL_FILES
+            .iter()
+            .all(|(fname, _)| sdir.join(fname).is_file())
+    });
+    AgentStatus {
+        detected: det,
+        mcp_configured,
+        skill_configured,
+        mcp_command,
+    }
+}
+
+pub fn agent_status(home: &Path, agent: Agent, _exe: &Path) -> (bool, bool) {
+    let st = agent_detail(home, agent);
+    (
+        st.detected,
+        st.mcp_configured && st.skill_configured.unwrap_or(true),
+    )
 }
 
 pub struct Options<'a> {

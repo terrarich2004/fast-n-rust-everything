@@ -103,27 +103,48 @@ fn agent_check(name: &str, bin: &str, fix: &str) -> mdoc::Check {
 
 fn check_fnr_setup(base_checks: &mut Vec<mdoc::Check>) {
     let Ok(home) = setup::home() else { return };
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("fast-n-rust"));
     for agent in Agent::ALL {
-        let (detected, configured) = setup::agent_status(&home, agent, &exe);
-        if !detected && !configured {
+        let st = setup::agent_detail(&home, agent);
+        if !st.detected && !st.mcp_configured {
             continue;
         }
-        let status = if configured {
-            Status::Ok
+        let broken_cmd = st.mcp_command.as_deref().and_then(|cmd| {
+            let p = std::path::Path::new(cmd);
+            (p.is_absolute() && !p.is_file()).then_some(cmd)
+        });
+        let (status, detail, ok) = if let Some(missing_cmd) = broken_cmd {
+            (
+                Status::Missing,
+                format!("MCP command not found: {missing_cmd}"),
+                false,
+            )
+        } else if !st.mcp_configured {
+            (
+                Status::Missing,
+                "agent detected, fast-n-rust not registered yet".to_string(),
+                false,
+            )
+        } else if st.skill_configured == Some(false) {
+            (
+                Status::Missing,
+                "fast-n-rust MCP configured, skills missing".to_string(),
+                false,
+            )
+        } else if st.skill_configured.is_none() {
+            (Status::Ok, "fast-n-rust MCP configured".to_string(), true)
         } else {
-            Status::Missing
+            (
+                Status::Ok,
+                "fast-n-rust MCP & skills configured".to_string(),
+                true,
+            )
         };
         base_checks.push(mdoc::Check {
             name: format!("fnr setup ({})", agent.name()),
             status,
             required: false,
-            detail: if configured {
-                "fast-n-rust MCP & skill configured".to_string()
-            } else {
-                "agent detected, fast-n-rust not registered yet".to_string()
-            },
-            fix: (!configured).then(|| "fast-n-rust setup".to_string()),
+            detail,
+            fix: (!ok).then(|| "fast-n-rust setup".to_string()),
         });
     }
 }
@@ -266,6 +287,9 @@ pub fn text(r: &UnifiedDoctorReport) -> String {
             c.name,
             c.detail
         ));
+        if let Some(fix) = &c.fix {
+            out.push_str(&format!("           fix: {fix}\n"));
+        }
     }
     out.push_str("\nAI Coding Agents:\n");
     for c in &r.agents {
@@ -275,6 +299,9 @@ pub fn text(r: &UnifiedDoctorReport) -> String {
             c.name,
             c.detail
         ));
+        if let Some(fix) = &c.fix {
+            out.push_str(&format!("           fix: {fix}\n"));
+        }
     }
     out.push_str(&format!(
         "\nBuild Caches:\n  shared cache : {} ({})\n  local .fast  : {} ({})\n",

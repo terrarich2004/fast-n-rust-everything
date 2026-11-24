@@ -31,9 +31,15 @@ static class /*CLASS*/
     static readonly FaFree? FreeFn;
 /*DIRECT_DECL*/
 
+    private static bool FnrEnvOn(string name)
+    {
+        var v = Environment.GetEnvironmentVariable(name);
+        return !string.IsNullOrEmpty(v) && v != "0" && !string.Equals(v, "false", StringComparison.OrdinalIgnoreCase);
+    }
+
     static /*CLASS*/()
     {
-        if (Environment.GetEnvironmentVariable("FNR_DISABLE") != null || Environment.GetEnvironmentVariable("FAST_ANYTHING_DISABLE") != null) return;
+        if (FnrEnvOn("FNR_DISABLE") || FnrEnvOn("FAST_ANYTHING_DISABLE")) return;
         try
         {
             var envDir = Environment.GetEnvironmentVariable("FNR_LIB_DIR");

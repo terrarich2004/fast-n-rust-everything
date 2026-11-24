@@ -6,7 +6,8 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { resolveBinary, ensureExecutable } = require("./fast-n-rust.js");
+const { spawnSync } = require("node:child_process");
+const { resolveBinary, findNativeOnPath, ensureExecutable } = require("./fast-n-rust.js");
 const { install, parseChecksum, releaseAssetName, verifySha256 } = require("../install.js");
 
 test("resolveBinary honors FNR_BIN override before everything else", () => {
@@ -88,4 +89,37 @@ test("install.js honors FNR_SKIP_DOWNLOAD=1 and verifies SHA-256 checksums", asy
   assert.equal(verifySha256(file, parsed), true);
   assert.equal(verifySha256(file, "0".repeat(64)), false);
   fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test("findNativeOnPath skips self wrapper and finds genuine native binaries", () => {
+  const selfDir = path.dirname(require.resolve("./fast-n-rust.js"));
+  const selfBin = path.join(selfDir, "fast-n-rust");
+  const nativeBin = "/usr/local/bin/fast-n-rust";
+  const got = findNativeOnPath(
+    "fast-n-rust",
+    { PATH: `${selfDir}${path.delimiter}/usr/local/bin` },
+    require.resolve("./fast-n-rust.js"),
+    (p) => p === selfBin || p === nativeBin,
+    (p) => (p === selfBin ? require.resolve("./fast-n-rust.js") : p)
+  );
+  assert.equal(got, nativeBin);
+
+  const none = findNativeOnPath(
+    "fast-n-rust",
+    { PATH: selfDir },
+    require.resolve("./fast-n-rust.js"),
+    (p) => p === selfBin,
+    () => require.resolve("./fast-n-rust.js")
+  );
+  assert.equal(none, null);
+});
+
+test("launcher fails fast instead of recursing when FNR_LAUNCHER_ACTIVE=1", () => {
+  const launcher = require.resolve("./fast-n-rust.js");
+  const res = spawnSync(process.execPath, [launcher, "--version"], {
+    encoding: "utf8",
+    env: { ...process.env, FNR_LAUNCHER_ACTIVE: "1" },
+  });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /refusing recursive launcher invocation/);
 });

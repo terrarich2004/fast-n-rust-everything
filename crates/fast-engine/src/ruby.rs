@@ -368,7 +368,7 @@ pub fn shim(port: &Port, lib_rel: &str) -> String {
     let mut lines = vec![
         "# Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the Ruby above instead.".to_string(),
         format!("# Undo with:  fnr disable {}", port.id),
-        "unless ENV[\"FNR_DISABLE\"] || ENV[\"FAST_ANYTHING_DISABLE\"]".to_string(),
+        "unless (ENV[\"FNR_DISABLE\"] && ![\"\", \"0\", \"false\"].include?(ENV[\"FNR_DISABLE\"].strip.downcase)) || (ENV[\"FAST_ANYTHING_DISABLE\"] && ![\"\", \"0\", \"false\"].include?(ENV[\"FAST_ANYTHING_DISABLE\"].strip.downcase))".to_string(),
         "  begin".to_string(),
         "    require \"fiddle\"".to_string(),
         "    require \"json\"".to_string(),

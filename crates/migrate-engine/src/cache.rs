@@ -19,13 +19,19 @@ const LOCK: &str = "owners.lock";
 
 /// The shared target folder in effect.
 pub fn shared_dir() -> PathBuf {
-    for var in ["CARGO_TARGET_DIR", "FNR_CACHE_DIR"] {
+    for var in ["FNR_CACHE_DIR", "CARGO_TARGET_DIR"] {
         if let Some(dir) = std::env::var_os(var).filter(|d| !d.is_empty()) {
             let dir = PathBuf::from(dir);
             return std::path::absolute(&dir).unwrap_or(dir);
         }
     }
     user_cache().join("fast-n-rust").join("target")
+}
+
+/// Whether [`shared_dir`] currently resolves to `CARGO_TARGET_DIR` (when `FNR_CACHE_DIR` is unset).
+pub fn shared_dir_from_cargo_env() -> bool {
+    std::env::var_os("FNR_CACHE_DIR").is_none_or(|d| d.is_empty())
+        && std::env::var_os("CARGO_TARGET_DIR").is_some_and(|d| !d.is_empty())
 }
 
 fn user_cache() -> PathBuf {
@@ -149,7 +155,7 @@ pub struct Cleaned {
 /// `CARGO_TARGET_DIR` is removed only with `force`, since other projects may use it.
 pub fn clean(dry_run: bool, force: bool) -> Result<Cleaned> {
     let dir = shared_dir();
-    let from_env = std::env::var_os("CARGO_TARGET_DIR").is_some_and(|d| !d.is_empty());
+    let from_env = shared_dir_from_cargo_env();
     let bytes = size(&dir);
     let removed = !dry_run && (!from_env || force) && dir.exists();
     if removed {

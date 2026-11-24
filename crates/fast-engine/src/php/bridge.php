@@ -11,7 +11,11 @@ final class /*CLASS*/
     public static function load(): bool
     {
         self::$on = false;
-        if (getenv('FNR_DISABLE') !== false || getenv('FAST_ANYTHING_DISABLE') !== false || !extension_loaded('ffi')) return false;
+        $fnrEnvOn = static function (string $name): bool {
+            $v = getenv($name);
+            return $v !== false && $v !== '' && $v !== '0' && strtolower($v) !== 'false';
+        };
+        if ($fnrEnvOn('FNR_DISABLE') || $fnrEnvOn('FAST_ANYTHING_DISABLE') || !extension_loaded('ffi')) return false;
         $envDir = getenv('FNR_LIB_DIR');
         $lib = ($envDir !== false && $envDir !== '')
             ? rtrim($envDir, "/\\") . '/' . /*LIB_NAME*/

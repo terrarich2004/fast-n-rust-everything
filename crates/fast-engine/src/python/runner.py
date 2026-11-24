@@ -616,6 +616,8 @@ def describe(path, line, name, entry, base):
     elif kind == "method":
         if cls_node is None:
             blockers.append("method on nested class")
+        elif node.decorator_list:
+            blockers.append("decorated method (e.g. @property)")
         elif not (node.args.posonlyargs or node.args.args):
             blockers.append("method missing self parameter")
         else:

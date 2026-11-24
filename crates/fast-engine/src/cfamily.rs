@@ -1576,7 +1576,7 @@ fn param_list(hs: &Hotspot) -> String {
         .join(", ")
 }
 
-const LOADER: &str = "#ifdef _WIN32\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#define FA_OPEN(p) ((void *) LoadLibraryA(p))\n#define FA_SYM(l, n) ((void *) GetProcAddress((HMODULE) (l), n))\n#define FA_STATE_T volatile LONG\n#define FA_LOAD_ACQ(p) InterlockedCompareExchange((volatile LONG *)(p), 0, 0)\n#define FA_CAS(p, expected, desired) (InterlockedCompareExchange((volatile LONG *)(p), (desired), (expected)) == (expected))\n#define FA_STORE_REL(p, v) InterlockedExchange((volatile LONG *)(p), (v))\n#define FA_YIELD() SwitchToThread()\n#else\n#include <dlfcn.h>\n#ifdef RTLD_NODELETE\n#define FA_RTLD_NODELETE RTLD_NODELETE\n#else\n#define FA_RTLD_NODELETE 0\n#endif\n#define FA_OPEN(p) dlopen(p, RTLD_NOW | RTLD_LOCAL | FA_RTLD_NODELETE)\n#define FA_SYM(l, n) dlsym(l, n)\n#define FA_STATE_T volatile int\n#define FA_LOAD_ACQ(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)\n#define FA_CAS(p, expected, desired) __sync_bool_compare_and_swap((p), (expected), (desired))\n#define FA_STORE_REL(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)\n#define FA_YIELD() ((void)0)\n#endif";
+const LOADER: &str = "#ifdef _WIN32\n#ifndef WIN32_LEAN_AND_MEAN\n#define WIN32_LEAN_AND_MEAN\n#endif\n#ifndef NOMINMAX\n#define NOMINMAX\n#endif\n#include <windows.h>\n#define FA_OPEN(p) ((void *) LoadLibraryA(p))\n#define FA_SYM(l, n) ((void *) GetProcAddress((HMODULE) (l), n))\n#define FA_STATE_T volatile LONG\n#define FA_LOAD_ACQ(p) InterlockedCompareExchange((volatile LONG *)(p), 0, 0)\n#define FA_CAS(p, expected, desired) (InterlockedCompareExchange((volatile LONG *)(p), (desired), (expected)) == (expected))\n#define FA_STORE_REL(p, v) InterlockedExchange((volatile LONG *)(p), (v))\n#define FA_YIELD() SwitchToThread()\n#else\n#include <dlfcn.h>\n#ifdef RTLD_NODELETE\n#define FA_RTLD_NODELETE RTLD_NODELETE\n#else\n#define FA_RTLD_NODELETE 0\n#endif\n#define FA_OPEN(p) dlopen(p, RTLD_NOW | RTLD_LOCAL | FA_RTLD_NODELETE)\n#define FA_SYM(l, n) dlsym(l, n)\n#define FA_STATE_T volatile int\n#define FA_LOAD_ACQ(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)\n#define FA_CAS(p, expected, desired) __sync_bool_compare_and_swap((p), (expected), (desired))\n#define FA_STORE_REL(p, v) __atomic_store_n((p), (v), __ATOMIC_RELEASE)\n#define FA_YIELD() ((void)0)\n#endif\nstatic inline int fa_env_on(const char *v) {\n    if (!v || !v[0] || strcmp(v, \"0\") == 0) return 0;\n    if ((v[0] == 'f' || v[0] == 'F') && (v[1] == 'a' || v[1] == 'A') && (v[2] == 'l' || v[2] == 'L') && (v[3] == 's' || v[3] == 'S') && (v[4] == 'e' || v[4] == 'E') && v[5] == '\\0') return 0;\n    return 1;\n}";
 
 fn lib_open_fn_c(s: &str, lib_name: &str, file_rel: &str) -> String {
     let name_lit = c_string_literal(lib_name);
@@ -1734,7 +1734,7 @@ int fa_on_S(void) {{
     if (s == 2) return 0;
     if (FA_CAS(&state, 0, 1)) {{
         int next = 2;
-        if (!(getenv("FNR_DISABLE") || getenv("FAST_ANYTHING_DISABLE"))) {{
+        if (!(fa_env_on(getenv("FNR_DISABLE")) || fa_env_on(getenv("FAST_ANYTHING_DISABLE")))) {{
             void *lib = fa_open_S();
             if (lib) {{
                 *(void **) &fa_direct_S = FA_SYM(lib, "fa_direct");
@@ -1831,7 +1831,7 @@ int fa_on_S(void) {{
     if (s == 2) return 0;
     if (FA_CAS(&state, 0, 1)) {{
         int next = 2;
-        if (!(getenv("FNR_DISABLE") || getenv("FAST_ANYTHING_DISABLE"))) {{
+        if (!(fa_env_on(getenv("FNR_DISABLE")) || fa_env_on(getenv("FAST_ANYTHING_DISABLE")))) {{
             void *lib = fa_open_S();
             if (lib) {{
                 *(void **) &fa_call_S = FA_SYM(lib, "fa_call");
@@ -2006,7 +2006,7 @@ struct Lib {{
     {abi_ret} (*direct)({ptr_params}) = nullptr;
     bool on = false;
     Lib() {{
-        if (std::getenv("FNR_DISABLE") || std::getenv("FAST_ANYTHING_DISABLE")) return;
+        if (fa_env_on(std::getenv("FNR_DISABLE")) || fa_env_on(std::getenv("FAST_ANYTHING_DISABLE"))) return;
         void *lib = open_lib();
         if (lib) {{
             *(void **) &direct = FA_SYM(lib, "fa_direct");
@@ -2066,7 +2066,7 @@ struct Lib {{
     void (*free)(unsigned char *, size_t) = nullptr;
     bool on = false;
     Lib() {{
-        if (std::getenv("FNR_DISABLE") || std::getenv("FAST_ANYTHING_DISABLE")) return;
+        if (fa_env_on(std::getenv("FNR_DISABLE")) || fa_env_on(std::getenv("FAST_ANYTHING_DISABLE"))) return;
         void *lib = open_lib();
         if (lib) {{
             *(void **) &bin = FA_SYM(lib, "fa_bin");
@@ -2143,7 +2143,7 @@ struct Lib {{
     void (*free)(unsigned char *, size_t) = nullptr;
     bool on = false;
     Lib() {{
-        if (std::getenv("FNR_DISABLE") || std::getenv("FAST_ANYTHING_DISABLE")) return;
+        if (fa_env_on(std::getenv("FNR_DISABLE")) || fa_env_on(std::getenv("FAST_ANYTHING_DISABLE"))) return;
         void *lib = open_lib();
         if (lib) {{
             *(void **) &call = FA_SYM(lib, "fa_call");

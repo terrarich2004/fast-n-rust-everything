@@ -27,7 +27,7 @@
 - **Обогащение `TASK.md`**: `fnr port` добавляет статические риски, `Performance Blueprint` (SIMD/ILP без FMA, work-stealing, ASCII `&[u8]` fast-path), рекомендации крейтов из `crates.toml` и чек-лист `gate`.
 - **`fnr escalate <id>`**: переносит hotspot-порт из `.fast/ports/<id>` в `rust/`-крейт с автоматическим отключением активного inline-патча, автоподстановкой совместимой реализации (`C/FFI`, `PyO3`, `napi-rs`) в `src/port.rs`, сохранением зависимостей, `known-diffs.jsonl`, вызовов (`recorded-inputs.jsonl`) и `hotspot_reference.rs`.
 - **Портативный деплой и Docker/CI**: шимы больше не зашивают абсолютные пути машины разработчика; в чистом чекауте без `state.json` работает `fnr build --deploy`, `FNR_LIB_DIR` задаёт путь к библиотекам, а `FNR_STRICT=1` не даёт коду молча откатиться на медленный оригинал при отсутствии `.so`/`.node`. Поддерживаются read-only методы классов в Python/TS (`self`/`this`) и авто-разворачивание `tsx` / `npx`.
-- **Компактный MCP по умолчанию (7 инструментов, `--all-tools` для 29)**: снижает расход токенов схемы LLM на ~75% при сохранении полной обратной совместимости.
+- **Компактный MCP по умолчанию (7 инструментов, `--all-tools` для 30)**: снижает расход токенов схемы LLM на ~75% при сохранении полной обратной совместимости.
 - **Безопасный `fnr clean` и исправленные баги апстримов**: `rust-anything` (#288–#291, #300–#301) и `fast-anything` (#76), двойные kill-switch переменные (`FNR_DISABLE=1` и `FAST_ANYTHING_DISABLE=1` / `RUST_ANYTHING_MODE=old`).
 
 ## Быстрый старт
@@ -115,7 +115,7 @@ fnr app lift .
 
 ## MCP-сервер, ресурсы и агенты
 
-Многопоточный JSON-RPC 2.0 MCP-сервер (`fast-n-rust mcp` / `fnr mcp`) с мгновенным `ping`, `notifications/cancelled`, изолированным по потокам `notifications/progress`, сериализацией мутирующих вызовов по workspace, аннотациями, **7 компактными инструментами по умолчанию** (`inspect`, `scaffold`, `check`, `switch`, `measure`, `ship`, `app` — или `--all-tools` для всех **29 инструментов**), **4 промптами** (`fast_optimize`, `port_unit`, `escalate_port`, `whole_app_rewrite`) и **5 MCP-ресурсами** (`fnr://guide/skill`, `fnr://guide/unit-porting`, `fnr://guide/whole-app`, `fnr://project/status`, `fnr://project/port-map`).
+Многопоточный JSON-RPC 2.0 MCP-сервер (`fast-n-rust mcp` / `fnr mcp`) с мгновенным `ping`, `notifications/cancelled`, изолированным по потокам `notifications/progress`, сериализацией мутирующих вызовов по workspace, аннотациями, **7 компактными инструментами по умолчанию** (`inspect`, `scaffold`, `check`, `switch`, `measure`, `ship`, `app` — или `--all-tools` для всех **30 инструментов**), **4 промптами** (`fast_optimize`, `port_unit`, `escalate_port`, `whole_app_rewrite`) и **5 MCP-ресурсами** (`fnr://guide/skill`, `fnr://guide/unit-porting`, `fnr://guide/whole-app`, `fnr://project/status`, `fnr://project/port-map`).
 
 Попробовать за 10 секунд на встроенном примере:
 

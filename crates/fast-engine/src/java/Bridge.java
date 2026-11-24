@@ -9,11 +9,16 @@ final class /*CLASS*/ {
     static final boolean ON, BIN_ON;
 /*DIRECT_FIELDS*/
 
+    private static boolean fnrEnvOn(String name) {
+        String s = System.getenv(name);
+        return s != null && !s.isEmpty() && !"0".equals(s) && !"false".equalsIgnoreCase(s);
+    }
+
     static {
         java.lang.reflect.Type t = Object.class;
         java.lang.invoke.MethodHandle c = null, b = null, f = null;
 /*DIRECT_INIT*/
-        if (System.getenv("FNR_DISABLE") == null && System.getenv("FAST_ANYTHING_DISABLE") == null) {
+        if (!fnrEnvOn("FNR_DISABLE") && !fnrEnvOn("FAST_ANYTHING_DISABLE")) {
             try {
                 t = /*CLASS*/.class.getDeclaredField("type").getGenericType();
                 var linker = java.lang.foreign.Linker.nativeLinker();

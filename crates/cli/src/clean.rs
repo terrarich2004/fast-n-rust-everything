@@ -31,6 +31,8 @@ pub struct CleanOutcome {
     pub reclaimed_bytes: u64,
     pub reclaimed_human: String,
     pub targets: Vec<CleanTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_cargo_target: Option<PathBuf>,
 }
 
 pub fn dir_size(path: &Path) -> u64 {
@@ -92,6 +94,20 @@ fn push_if_exists(
 }
 
 pub fn clean(root: &Path, opts: &CleanOptions) -> Result<CleanOutcome> {
+    clean_with_shared(
+        root,
+        opts,
+        fnr_migrate::cache::shared_dir(),
+        fnr_migrate::cache::shared_dir_from_cargo_env(),
+    )
+}
+
+fn clean_with_shared(
+    root: &Path,
+    opts: &CleanOptions,
+    shared_dir: PathBuf,
+    shared_from_cargo_env: bool,
+) -> Result<CleanOutcome> {
     let any_flag = opts.cache || opts.ports || opts.rust || opts.all;
     let do_cache = opts.cache || opts.all || !any_flag;
     let do_rust = opts.rust || opts.all;
@@ -99,6 +115,7 @@ pub fn clean(root: &Path, opts: &CleanOptions) -> Result<CleanOutcome> {
 
     if do_ports
         && !opts.force
+        && root.join(".fast").join("state.json").is_file()
         && let Ok(ctx) = fnr_fast::state::Ctx::open(root)
     {
         let active: Vec<&str> = ctx
@@ -118,20 +135,24 @@ pub fn clean(root: &Path, opts: &CleanOptions) -> Result<CleanOutcome> {
 
     let mut seen = Vec::new();
     let mut targets = Vec::new();
+    let mut skipped_cargo_target = None;
 
     if do_cache {
-        push_if_exists(
-            &mut targets,
-            "shared-cache",
-            fnr_migrate::cache::shared_dir(),
-            &mut seen,
-        );
-        push_if_exists(
-            &mut targets,
-            "fast-target",
-            root.join(".fast").join("target"),
-            &mut seen,
-        );
+        if shared_from_cargo_env && !opts.force {
+            if shared_dir.exists() {
+                skipped_cargo_target = Some(shared_dir);
+            }
+        } else {
+            push_if_exists(&mut targets, "shared-cache", shared_dir, &mut seen);
+        }
+        if !do_ports {
+            push_if_exists(
+                &mut targets,
+                "fast-target",
+                root.join(".fast").join("target"),
+                &mut seen,
+            );
+        }
     }
 
     if do_rust {
@@ -162,11 +183,13 @@ pub fn clean(root: &Path, opts: &CleanOptions) -> Result<CleanOutcome> {
         reclaimed_bytes: reclaimed,
         reclaimed_human: human_bytes(reclaimed),
         targets,
+        skipped_cargo_target,
     })
 }
 
 pub fn text(out: &CleanOutcome) -> String {
-    if out.targets.is_empty() {
+    let mut s = String::new();
+    if out.targets.is_empty() && out.skipped_cargo_target.is_none() {
         return "Nothing to clean.\n".to_string();
     }
     let verb = if out.dry_run {
@@ -174,7 +197,6 @@ pub fn text(out: &CleanOutcome) -> String {
     } else {
         "Removed"
     };
-    let mut s = String::new();
     for t in &out.targets {
         s.push_str(&format!(
             "  {verb} [{}] {} ({})\n",
@@ -183,12 +205,20 @@ pub fn text(out: &CleanOutcome) -> String {
             t.human_size
         ));
     }
-    let summary = if out.dry_run {
-        "Would reclaim"
-    } else {
-        "Reclaimed"
-    };
-    s.push_str(&format!("{summary} {}.\n", out.reclaimed_human));
+    if let Some(ref p) = out.skipped_cargo_target {
+        s.push_str(&format!(
+            "  Skipped [shared-cache] {} (from CARGO_TARGET_DIR; pass --force to remove)\n",
+            p.display()
+        ));
+    }
+    if !out.targets.is_empty() {
+        let summary = if out.dry_run {
+            "Would reclaim"
+        } else {
+            "Reclaimed"
+        };
+        s.push_str(&format!("{summary} {}.\n", out.reclaimed_human));
+    }
     s
 }
 
@@ -285,6 +315,72 @@ mod tests {
         )
         .unwrap();
         assert!(!fast.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_skips_cargo_target_dir_without_force_and_removes_with_force() {
+        let root = scratch("cargo-env-guard");
+        let shared = root.join("shared-cargo-target");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("marker.bin"), vec![1u8; 1024]).unwrap();
+
+        let no_force = clean_with_shared(
+            &root,
+            &CleanOptions {
+                cache: true,
+                ..Default::default()
+            },
+            shared.clone(),
+            true,
+        )
+        .unwrap();
+        assert!(
+            shared.exists(),
+            "CARGO_TARGET_DIR must not be deleted without --force"
+        );
+        assert_eq!(no_force.skipped_cargo_target.as_ref(), Some(&shared));
+        assert!(text(&no_force).contains("CARGO_TARGET_DIR"));
+
+        let forced = clean_with_shared(
+            &root,
+            &CleanOptions {
+                cache: true,
+                force: true,
+                ..Default::default()
+            },
+            shared.clone(),
+            true,
+        )
+        .unwrap();
+        assert!(!shared.exists(), "--force must remove CARGO_TARGET_DIR");
+        assert!(forced.reclaimed_bytes >= 1024);
+        assert!(forced.skipped_cargo_target.is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clean_cache_and_ports_does_not_double_count_fast_target() {
+        let root = scratch("no-double-count");
+        let fast_target = root.join(".fast/target");
+        fs::create_dir_all(&fast_target).unwrap();
+        fs::write(fast_target.join("blob.bin"), vec![2u8; 4096]).unwrap();
+
+        let out = clean_with_shared(
+            &root,
+            &CleanOptions {
+                cache: true,
+                ports: true,
+                dry_run: true,
+                ..Default::default()
+            },
+            root.join("missing-shared"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.targets.len(), 1);
+        assert_eq!(out.targets[0].kind, "fast-state");
+        assert_eq!(out.reclaimed_bytes, 4096);
         let _ = fs::remove_dir_all(&root);
     }
 }

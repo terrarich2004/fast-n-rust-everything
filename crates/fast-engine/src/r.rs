@@ -706,7 +706,7 @@ pub fn shim(port: &Port, lib_rel: &str, lib_root_rel: &str) -> String {
     [
         "# Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the R above instead.".to_string(),
         format!("# Undo with:  fnr disable {}", port.id),
-        format!("if (!nzchar(Sys.getenv(\"FNR_DISABLE\")) && !nzchar(Sys.getenv(\"FAST_ANYTHING_DISABLE\"))) {f} <- local({{"),
+        format!("if ((tolower(trimws(Sys.getenv(\"FNR_DISABLE\"))) %in% c(\"\", \"0\", \"false\")) && (tolower(trimws(Sys.getenv(\"FAST_ANYTHING_DISABLE\"))) %in% c(\"\", \"0\", \"false\"))) {f} <- local({{"),
         "  from <- c(tryCatch(dirname(normalizePath(sys.frame(1)$ofile)), error = function(e) NULL),".to_string(),
         "            tryCatch(dirname(normalizePath(sub(\"^--file=\", \"\", grep(\"^--file=\", commandArgs(FALSE), value = TRUE)[1]))), error = function(e) NULL))".to_string(),
         "  env_dir <- Sys.getenv(\"FNR_LIB_DIR\")".to_string(),

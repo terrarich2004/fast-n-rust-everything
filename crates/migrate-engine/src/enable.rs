@@ -181,7 +181,7 @@ fn supported(manifest: &Manifest) -> Result<()> {
         _ if is_supported(manifest) => Ok(()),
         lang => bail!(
             "`enable` switches TS/JS, Python and PowerShell ports in place; for {} use the shadow module \
-             (`rust-anything shadow`), imported where the app imported the original, and \
+             (`fnr shadow`), imported where the app imported the original, and \
              RUST_ANYTHING_MODE=old|shadow|new",
             lang.name()
         ),
@@ -222,9 +222,7 @@ fn esm(file: &str, text: &str) -> bool {
 fn marker(comment: &str, crate_name: &str, crate_dir: &Path, dir: &Path) -> (String, String) {
     let at = crate::shadow::relative(dir, crate_dir);
     (
-        format!(
-            "{comment} {START} {crate_name} is on. `rust-anything disable {at}` removes this block."
-        ),
+        format!("{comment} {START} {crate_name} is on. `fnr disable {at}` removes this block."),
         format!("{comment} {END} {crate_name}"),
     )
 }
@@ -256,7 +254,7 @@ fn js_block(
     format!(
         "{start}\n\
          // @ts-ignore\n\
-         const {var} = ((p) => p && !p.env.FNR_DISABLE && p.env.RUST_ANYTHING_MODE !== 'old' && p.env.{switch} !== 'original' && (() => {{ try {{ const m = p.getBuiltinModule('node:module'); const at = p.getBuiltinModule('node:path').join({here}, {rel:?}); return m.createRequire(at)(at) }} catch (e) {{ if (p.env.RUST_ANYTHING_MODE === 'new') throw e }} }})())(globalThis.process)\n\
+         const {var} = ((p) => p && !((v) => v && v !== '0' && v.toLowerCase() !== 'false')(p.env.FNR_DISABLE) && p.env.RUST_ANYTHING_MODE !== 'old' && p.env.{switch} !== 'original' && (() => {{ try {{ const m = p.getBuiltinModule('node:module'); const at = p.getBuiltinModule('node:path').join({here}, {rel:?}); return m.createRequire(at)(at) }} catch (e) {{ if (p.env.RUST_ANYTHING_MODE === 'new') throw e }} }})())(globalThis.process)\n\
          // @ts-ignore\n\
          if ({var}) {{ {} }}\n\
          {end}\n",
@@ -284,7 +282,7 @@ fn python_block(
          def {fun}():\n\
          \x20   import importlib, os, sys\n\
          \x20   mode = os.environ.get(\"RUST_ANYTHING_MODE\")\n\
-         \x20   if os.environ.get(\"FNR_DISABLE\") or mode == \"old\" or os.environ.get(\"{switch}\") == \"original\":\n\
+         \x20   if os.environ.get(\"FNR_DISABLE\", \"\").strip().lower() not in (\"\", \"0\", \"false\") or mode == \"old\" or os.environ.get(\"{switch}\") == \"original\":\n\
          \x20       return\n\
          \x20   at = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), {rel:?}))\n\
          \x20   sys.path.insert(0, at)\n\
@@ -312,7 +310,7 @@ fn powershell_block(manifest: &Manifest, crate_dir: &Path, dir: &Path, switch: &
     let rel = crate::shadow::relative(dir, &wrapper).replace('\'', "''");
     format!(
         "{start}\n\
-         if (!$env:FNR_DISABLE -and $env:RUST_ANYTHING_MODE -ne 'old' -and $env:{switch} -ne 'original') {{\n\
+         if ((!$env:FNR_DISABLE -or @('0','false') -contains $env:FNR_DISABLE.ToLowerInvariant()) -and $env:RUST_ANYTHING_MODE -ne 'old' -and $env:{switch} -ne 'original') {{\n\
          \x20   try {{\n\
          \x20       . (Join-Path $PSScriptRoot '{rel}')\n\
          \x20   }} catch {{\n\

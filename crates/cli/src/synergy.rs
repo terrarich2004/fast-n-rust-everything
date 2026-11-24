@@ -1155,6 +1155,7 @@ pub(crate) fn try_splice_hotspot_port(
     if matches!(lang, FastLang::Python | FastLang::Node) {
         let check = std::process::Command::new("cargo")
             .args(["check", "--quiet"])
+            .env("CARGO_TARGET_DIR", fnr_migrate::cache::shared_dir())
             .current_dir(bridged_crate)
             .output();
         let compile_err = match check {
@@ -2123,6 +2124,9 @@ pub fn package_hotspot_port_with(
         files.push("index.mjs".to_string());
         files.push("index.d.ts".to_string());
         files.push("Cargo.toml".to_string());
+        if ctx.crate_dir(&port).join("build.rs").is_file() {
+            files.push("build.rs".to_string());
+        }
         files.push("src/lib.rs".to_string());
     }
 
@@ -2214,12 +2218,24 @@ pub fn package_hotspot_port_with(
         if crate_dir.join("Cargo.lock").is_file() {
             fs::copy(crate_dir.join("Cargo.lock"), dest_dir.join("Cargo.lock"))?;
         }
-        if crate_dir.join("build.rs").is_file() {
+        let has_build_rs = crate_dir.join("build.rs").is_file();
+        if has_build_rs {
             fs::copy(crate_dir.join("build.rs"), dest_dir.join("build.rs"))?;
         }
         if crate_dir.join("src").is_dir() {
             copy_dir_recursive(&crate_dir.join("src"), &dest_dir.join("src"))?;
         }
+        let mut npm_files = vec![
+            lib_name.clone(),
+            "index.cjs".to_string(),
+            "index.mjs".to_string(),
+            "index.d.ts".to_string(),
+            "Cargo.toml".to_string(),
+        ];
+        if has_build_rs {
+            npm_files.push("build.rs".to_string());
+        }
+        npm_files.push("src/".to_string());
         let pkg_json = json!({
             "name": port.ext,
             "version": "0.1.0",
@@ -2234,7 +2250,7 @@ pub fn package_hotspot_port_with(
                     "types": "./index.d.ts"
                 }
             },
-            "files": [lib_name, "index.cjs", "index.mjs", "index.d.ts", "Cargo.toml", "src/"]
+            "files": npm_files
         });
         fs::write(
             dest_dir.join("package.json"),
@@ -2816,6 +2832,35 @@ mod tests {
         let status = unified_status(&root).unwrap();
         assert_eq!(status.hotspots.len(), 1);
         assert_eq!(status.hotspots[0].transport, "direct C ABI");
+        let node_crate = root.join(".fast/ports/app_js");
+        fs::create_dir_all(&node_crate).unwrap();
+        fs::write(node_crate.join("build.rs"), "fn main() {}\n").unwrap();
+        let mut ctx_node = Ctx::open(&root).unwrap();
+        ctx_node.state.ports.insert(
+            "app.js".into(),
+            fnr_fast::state::Port {
+                id: "app.js".into(),
+                file: "app.mjs".into(),
+                module: "app".into(),
+                func: "js".into(),
+                ext: "fa_js".into(),
+                crate_dir: ".fast/ports/app_js".into(),
+                recorded: 1,
+                calls_seen: 1,
+                verify: ctx_node.state.ports["app.f"].verify.clone(),
+                enabled: false,
+                lang: FastLang::Node,
+                owner: None,
+                instance_method: false,
+                self_fields: vec![],
+                line: 1,
+                sources: vec![],
+                build_profile: None,
+            },
+        );
+        ctx_node.save().unwrap();
+        let node_pkg = package_hotspot_port(&root, Some("app.js"), None, true).unwrap();
+        assert!(node_pkg.files.contains(&"build.rs".to_string()));
         let shrunk = shrink_candidates(&json!([[1, 2, 3, 4], "hello", 100]));
         assert!(!shrunk.is_empty());
         let _ = fs::remove_dir_all(&root);

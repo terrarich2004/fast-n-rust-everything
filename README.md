@@ -39,7 +39,7 @@
 | **`fnr escalate <id>`** (promote `.fast/` port + deps to `rust/` unit crate) | ❌ | ❌ | ✅ |
 | **Strict `--gate` (`fmt`, `clippy -D warnings`, `test`, `unsafe`) on hotspots** | ❌ | Unit-only | ✅ |
 | **`fnr clean`** (`--cache`, `--ports`, `--rust`, `--all`, `--dry-run`) | ❌ (#76) | Partial | ✅ |
-| Token-efficient 7-tool Compact MCP default (`--all-tools` for 29 legacy tools) | 8 tools | 23 tools | ✅ (7 compact / 29 full) |
+| Token-efficient 7-tool Compact MCP default (`--all-tools` for 30 legacy tools) | 8 tools | 23 tools | ✅ (7 compact / 30 full) |
 | Upstream bug fixes (`rust-anything` #288–#291, #300–#301; `fast-anything` #76) | — | — | ✅ |
 
 ## Quick Start
@@ -155,7 +155,7 @@ fnr app lift .
 
 ## MCP Server & Agents
 
-Built-in threaded JSON-RPC 2.0 MCP server (`fast-n-rust mcp` / `fnr mcp`) with non-blocking `ping`, `notifications/cancelled`, per-thread isolated `notifications/progress`, per-workspace serialization of mutating calls, full tool `annotations`, structured error hints, **7 compact orchestrator tools by default** (`inspect`, `scaffold`, `check`, `switch`, `measure`, `ship`, `app` — cutting agent schema token usage by ~75%, with `--all-tools` exposing all **29 fine-grained tools**), **4 prompts** (`fast_optimize`, `port_unit`, `escalate_port`, `whole_app_rewrite`), and **5 MCP resources** (`fnr://guide/skill`, `fnr://guide/unit-porting`, `fnr://guide/whole-app`, `fnr://project/status`, `fnr://project/port-map`).
+Built-in threaded JSON-RPC 2.0 MCP server (`fast-n-rust mcp` / `fnr mcp`) with non-blocking `ping`, `notifications/cancelled`, per-thread isolated `notifications/progress`, per-workspace serialization of mutating calls, full tool `annotations`, structured error hints, **7 compact orchestrator tools by default** (`inspect`, `scaffold`, `check`, `switch`, `measure`, `ship`, `app` — cutting agent schema token usage by ~75%, with `--all-tools` exposing all **30 fine-grained tools**), **4 prompts** (`fast_optimize`, `port_unit`, `escalate_port`, `whole_app_rewrite`), and **5 MCP resources** (`fnr://guide/skill`, `fnr://guide/unit-porting`, `fnr://guide/whole-app`, `fnr://project/status`, `fnr://project/port-map`).
 
 ```sh
 fnr setup                                  # auto-detects & configures installed agents + progressive-disclosure skills

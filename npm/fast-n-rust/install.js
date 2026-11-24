@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const http = require("node:http");
 const https = require("node:https");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
@@ -45,11 +46,13 @@ function downloadBuffer(url, redirects = 0) {
       reject(new Error(`too many redirects for ${url}`));
       return;
     }
-    https
+    const client = url.startsWith("http://") ? http : https;
+    client
       .get(url, { headers: { "User-Agent": "fast-n-rust-npm-installer" } }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          resolve(downloadBuffer(res.headers.location, redirects + 1));
+          const nextUrl = new URL(res.headers.location, url).toString();
+          resolve(downloadBuffer(nextUrl, redirects + 1));
           return;
         }
         if (res.statusCode !== 200) {
@@ -78,7 +81,7 @@ async function install(env = process.env) {
 
   const asset = releaseAssetName();
   if (!asset) {
-    console.warn(`[fast-n-rust] No prebuilt binary for ${process.platform}-${process.arch}; build with: cargo install --path crates/cli`);
+    console.warn(`[fast-n-rust] No prebuilt binary for ${process.platform}-${process.arch}; build with: cargo install --git https://github.com/terrarich2004/fast-n-rust-everything fast-n-rust`);
     return { status: "unsupported" };
   }
 
@@ -108,9 +111,14 @@ async function install(env = process.env) {
       }
     }
 
+    const psEscape = (s) => s.replace(/'/g, "''");
     const extract =
       process.platform === "win32"
-        ? spawnSync("powershell", ["-NoProfile", "-Command", `Expand-Archive -Force '${archivePath}' '${destDir}'`], { stdio: "pipe" })
+        ? spawnSync(
+            "powershell",
+            ["-NoProfile", "-Command", `Expand-Archive -Force '${psEscape(archivePath)}' '${psEscape(destDir)}'`],
+            { stdio: "pipe" }
+          )
         : spawnSync("tar", ["-xzf", archivePath, "-C", destDir], { stdio: "pipe" });
     if (extract.status !== 0) {
       throw new Error(`archive extraction failed: ${extract.stderr?.toString() || extract.status}`);
@@ -123,7 +131,7 @@ async function install(env = process.env) {
     return { status: "installed", path: exe };
   } catch (err) {
     fs.rmSync(archivePath, { force: true });
-    console.warn(`[fast-n-rust] Prebuilt download skipped (${err.message}). Install from source with: cargo install --path crates/cli`);
+    console.warn(`[fast-n-rust] Prebuilt download skipped (${err.message}). Install from source with: cargo install --git https://github.com/terrarich2004/fast-n-rust-everything fast-n-rust`);
     return { status: "fallback", error: err.message };
   }
 }

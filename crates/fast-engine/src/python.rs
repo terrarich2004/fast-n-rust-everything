@@ -1020,7 +1020,7 @@ pub fn shim(port: &Port, lib_rel: &str) -> String {
         format!("# Undo with:  fnr disable {}", port.id),
         "def _fast_anything_load():".to_string(),
         "    import os, sys".to_string(),
-        "    if os.environ.get(\"FNR_DISABLE\") or os.environ.get(\"FAST_ANYTHING_DISABLE\"):".to_string(),
+        "    if os.environ.get(\"FNR_DISABLE\", \"\").strip().lower() not in (\"\", \"0\", \"false\") or os.environ.get(\"FAST_ANYTHING_DISABLE\", \"\").strip().lower() not in (\"\", \"0\", \"false\"):".to_string(),
         "        return None".to_string(),
         format!("    _rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), \"{lib_rel}\"))"),
         "    _override = os.environ.get(\"FNR_LIB_DIR\")".to_string(),
@@ -2048,5 +2048,51 @@ sys.exit(1 if fails else 0)
             !marker.exists(),
             "queued task must not execute after terminate"
         );
+    }
+
+    #[test]
+    fn property_decorated_methods_are_blocked() {
+        let Some(python) = ["python3", "python"].into_iter().find(|p| {
+            Command::new(p)
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+        }) else {
+            eprintln!("no python on PATH, skipping");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("fa-prop-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("runner.py"), RUNNER).unwrap();
+        fs::write(
+            dir.join("mod_prop.py"),
+            "class Box:\n    def __init__(self, x: int):\n        self.x = x\n    @property\n    def doubled(self) -> int:\n        return self.x * 2\n",
+        )
+        .unwrap();
+        let check = "import json, os, runpy, sys\n\
+                     d = sys.argv[1]\n\
+                     describe = runpy.run_path(os.path.join(d, 'runner.py'))['describe']\n\
+                     info = describe(os.path.join(d, 'mod_prop.py'), 5, 'doubled', os.path.join(d, 'app.py'), d)\n\
+                     print(json.dumps(info))\n";
+        let out = Command::new(python)
+            .args(["-c", check, dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let info: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(info["instance_method"], false);
+        let blockers = info["blockers"].as_array().unwrap();
+        assert!(
+            blockers
+                .iter()
+                .any(|b| b.as_str().unwrap_or("").contains("decorated method")),
+            "expected decorated method blocker, got: {info}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

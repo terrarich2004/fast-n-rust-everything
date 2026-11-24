@@ -9,7 +9,7 @@ Use **fast-n-rust** to speed up hot code or incrementally rewrite an app into pu
 
 ## Compact MCP Server (Default)
 
-`fnr mcp` exposes **7 intent-based tools** (`inspect`, `scaffold`, `check`, `switch`, `measure`, `ship`, `app`) to save agent context tokens, while still dispatching all 29 legacy tool names (`scan`, `port`, `verify`, `gate`, `fuzz`, `enable`, `bench`, ...). Pass `fnr mcp --all-tools` if a client expects all 29 schemas listed.
+`fnr mcp` exposes **7 intent-based tools** (`inspect`, `scaffold`, `check`, `switch`, `measure`, `ship`, `app`) to save agent context tokens, while still dispatching all 30 legacy tool names (`scan`, `port`, `verify`, `gate`, `ci`, `fuzz`, `enable`, `bench`, ...). Pass `fnr mcp --all-tools` if a client expects all 30 schemas listed.
 
 ## Decision Tree: Which Mode?
 

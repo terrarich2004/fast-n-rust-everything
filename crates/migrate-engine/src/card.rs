@@ -136,13 +136,18 @@ fn cases_per_function(crate_dir: &Path) -> BTreeMap<String, usize> {
 /// The CPU's name and its core count, as `bench` numbers must be published with.
 pub fn machine() -> String {
     let cores = std::thread::available_parallelism().map_or(0, std::num::NonZero::get);
-    let mut cmd = std::process::Command::new("sysctl");
-    cmd.args(["-n", "machdep.cpu.brand_string"]);
-    let name = crate::process::output(&mut cmd, crate::process::QUICK)
-        .ok()
-        .filter(crate::process::Output::success)
-        .map(|o| o.stdout_text().trim().to_string())
-        .filter(|s| !s.is_empty())
+    let macos_brand = if cfg!(target_os = "macos") {
+        let mut cmd = std::process::Command::new("sysctl");
+        cmd.args(["-n", "machdep.cpu.brand_string"]);
+        crate::process::output(&mut cmd, crate::process::QUICK)
+            .ok()
+            .filter(crate::process::Output::success)
+            .map(|o| o.stdout_text().trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    let name = macos_brand
         .or_else(|| {
             std::fs::read_to_string("/proc/cpuinfo").ok().and_then(|t| {
                 t.lines()

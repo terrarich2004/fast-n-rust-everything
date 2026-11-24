@@ -446,9 +446,9 @@ pub enum Cmd {
     },
 
     // --- Ops & Agent Integration ---
-    /// Run as an MCP server over stdio (JSON-RPC 2.0; compact 7-tool mode by default, or `--all-tools` for 29 tools).
+    /// Run as an MCP server over stdio (JSON-RPC 2.0; compact 7-tool mode by default, or `--all-tools` for 30 tools).
     Mcp {
-        /// Expose all 29 fine-grained legacy tools instead of the default 7 compact orchestrator tools.
+        /// Expose all 30 fine-grained legacy tools instead of the default 7 compact orchestrator tools.
         #[arg(long)]
         all_tools: bool,
     },
@@ -595,6 +595,14 @@ fn abs(p: &Path) -> PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+fn resolve_in(root: &Path, p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        abs(&root.join(p))
+    }
+}
+
 fn print_banner() {
     eprintln!("⚡ fast-n-rust v{} (fnr)", env!("CARGO_PKG_VERSION"));
 }
@@ -623,6 +631,13 @@ fn is_silent_cmd(cmd: &Cmd) -> bool {
             | Cmd::Setup { json: true, .. }
             | Cmd::Doctor { json: true }
             | Cmd::Clean { json: true, .. }
+            | Cmd::App {
+                command: AppCmd::Record { json: true, .. }
+                    | AppCmd::Replay { json: true, .. }
+                    | AppCmd::FrontDoor { json: true, .. }
+                    | AppCmd::Wire { json: true, .. }
+                    | AppCmd::Lift { json: true, .. }
+            }
     )
 }
 
@@ -684,7 +699,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
         }
         Cmd::Scan { cdb, json, command } => {
             let command = if let Some(cdb_path) = cdb {
-                fnr_fast::cfamily::command_from_cdb(&abs(&cdb_path), &command)?
+                fnr_fast::cfamily::command_from_cdb(&resolve_in(root, &cdb_path), &command)?
             } else {
                 anyhow::ensure!(
                     !command.is_empty(),
@@ -733,7 +748,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
         } => {
             let vopts = fnr_fast::pipeline::VerifyOptions {
                 float_tolerance,
-                known_diffs: known_diffs.map(|p| abs(&p)),
+                known_diffs: known_diffs.map(|p| resolve_in(root, &p)),
                 min_speedup,
             };
             if all {
@@ -776,7 +791,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             command,
         } => {
             let command = if let Some(cdb_path) = cdb {
-                fnr_fast::cfamily::command_from_cdb(&abs(&cdb_path), &command)?
+                fnr_fast::cfamily::command_from_cdb(&resolve_in(root, &cdb_path), &command)?
             } else {
                 anyhow::ensure!(
                     !command.is_empty(),
@@ -1069,7 +1084,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             lang,
             whole_app: wa,
         } => {
-            let r = abs(&r);
+            let r = resolve_in(root, &r);
             let lang = lang.unwrap_or_else(|| Lang::detect(&r));
             let mut rep = analyze::analyze_lang(&r, lang)
                 .with_context(|| format!("analyzing {}", r.display()))?;
@@ -1096,7 +1111,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             lang,
             command,
         } => {
-            let rep = profile::profile(&abs(&r), &command, lang)?;
+            let rep = profile::profile(&resolve_in(root, &r), &command, lang)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&rep)?);
             } else {
@@ -1140,7 +1155,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             allocator,
         } => {
             let outcome = bridge::bridge(&bridge::Options {
-                root: &abs(&r),
+                root: &resolve_in(root, &r),
                 unit: &unit,
                 kind: kind.map(|k| match k {
                     KindArg::Napi => bridge::Kind::Napi,
@@ -1163,7 +1178,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             );
         }
         Cmd::Refresh { crate_dir, batch } => {
-            let c = abs(&crate_dir);
+            let c = resolve_in(root, &crate_dir);
             let r = if batch.is_empty() {
                 bridge::refresh(&c)?
             } else {
@@ -1185,7 +1200,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             float_tolerance,
             from_tests,
         } => {
-            let c = abs(&crate_dir);
+            let c = resolve_in(root, &crate_dir);
             let mut inputs = inputs;
             if !from_tests.is_empty() {
                 let cap = fnr_migrate::from_tests::capture(&c, &from_tests)?;
@@ -1228,7 +1243,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             }
             None => fnr_fast::pipeline::build_all(root)?,
             Some(c) => {
-                let c = abs(&c);
+                let c = resolve_in(root, &c);
                 match profile {
                     ProfileArg::Host => println!("Built {}", harness::build(&c)?.display()),
                     ProfileArg::Android => {
@@ -1256,7 +1271,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             float_tolerance,
             json,
         } => {
-            let c = abs(&crate_dir);
+            let c = resolve_in(root, &crate_dir);
             let out = harness::diff(&harness::DiffOptions {
                 crate_dir: &c,
                 module: module.as_deref(),
@@ -1367,7 +1382,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             }
         },
         Cmd::Shadow { crate_dir, out } => {
-            let s = shadow::shadow(&abs(&crate_dir), out.as_deref())?;
+            let s = shadow::shadow(&resolve_in(root, &crate_dir), out.as_deref())?;
             println!("Wrote {} ({})", s.path.display(), s.exports.join(", "));
         }
         Cmd::Gate {
@@ -1454,7 +1469,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
             check,
             json,
         } => {
-            let m = port_map::map(&abs(&repo), &crates)?;
+            let m = port_map::map(&resolve_in(root, &repo), &crates)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&m)?);
             } else if write {
@@ -1525,7 +1540,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                 }
             }
         },
-        Cmd::App { command } => return run_app(command),
+        Cmd::App { command } => return run_app(command, root),
         Cmd::Setup {
             agents,
             remove,
@@ -1605,7 +1620,7 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn run_app(cmd: AppCmd) -> Result<ExitCode> {
+fn run_app(cmd: AppCmd, root: &Path) -> Result<ExitCode> {
     match cmd {
         AppCmd::Record {
             repo,
@@ -1635,7 +1650,7 @@ fn run_app(cmd: AppCmd) -> Result<ExitCode> {
                 db_dump.as_deref(),
             )?;
             let out = app::record(&app::RecordOptions {
-                repo: &abs(&repo),
+                repo: &resolve_in(root, &repo),
                 run: &run,
                 inputs: inputs.as_deref(),
                 normalize: &normalize,
@@ -1666,7 +1681,7 @@ fn run_app(cmd: AppCmd) -> Result<ExitCode> {
             json,
         } => {
             let out = app::replay(&app::ReplayOptions {
-                repo: &abs(&repo),
+                repo: &resolve_in(root, &repo),
                 build: build.as_deref(),
                 timeout_secs: timeout,
                 port,
@@ -1693,7 +1708,7 @@ fn run_app(cmd: AppCmd) -> Result<ExitCode> {
             json,
         } => {
             let out = front_door::front_door(&front_door::FrontDoorOptions {
-                repo: &abs(&repo),
+                repo: &resolve_in(root, &repo),
                 library,
                 check: !no_check,
             })?;
@@ -1717,7 +1732,7 @@ fn run_app(cmd: AppCmd) -> Result<ExitCode> {
             json,
         } => {
             let out = front_door::wire(&front_door::WireOptions {
-                repo: &abs(&repo),
+                repo: &resolve_in(root, &repo),
                 unit: &unit,
                 commands: &commands,
                 routes: &routes,
@@ -1734,7 +1749,9 @@ fn run_app(cmd: AppCmd) -> Result<ExitCode> {
             }
         }
         AppCmd::Lift { repo, json } => {
-            let out = lift::lift(&lift::LiftOptions { repo: &abs(&repo) })?;
+            let out = lift::lift(&lift::LiftOptions {
+                repo: &resolve_in(root, &repo),
+            })?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else if out.lifted {
@@ -1750,6 +1767,8 @@ fn run_app(cmd: AppCmd) -> Result<ExitCode> {
                 for b in &out.blockers {
                     println!("  - {b}");
                 }
+            }
+            if !out.lifted {
                 return Ok(ExitCode::FAILURE);
             }
         }
@@ -1812,5 +1831,27 @@ mod tests {
 
         let mcp_full = Cli::try_parse_from(["fnr", "mcp", "--all-tools"]).unwrap();
         assert!(matches!(mcp_full.cmd, Cmd::Mcp { all_tools: true }));
+    }
+
+    #[test]
+    fn resolve_in_honors_dir_and_app_json_is_silent() {
+        let root = Path::new("/tmp/fnr-ws");
+        assert_eq!(
+            resolve_in(root, Path::new(".")),
+            PathBuf::from("/tmp/fnr-ws")
+        );
+        assert_eq!(
+            resolve_in(root, Path::new("rust/demo")),
+            PathBuf::from("/tmp/fnr-ws/rust/demo")
+        );
+        assert_eq!(
+            resolve_in(root, Path::new("/opt/other")),
+            PathBuf::from("/opt/other")
+        );
+
+        let lift_json = Cli::try_parse_from(["fnr", "app", "lift", "--json"]).unwrap();
+        assert!(is_silent_cmd(&lift_json.cmd));
+        let lift_text = Cli::try_parse_from(["fnr", "app", "lift"]).unwrap();
+        assert!(!is_silent_cmd(&lift_text.cmd));
     }
 }

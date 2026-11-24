@@ -284,7 +284,7 @@ fn write(
         }
     } else if out.exists() && std::fs::read_dir(out)?.next().is_some() {
         bail!(
-            "{} is not empty and was not written by `rust-anything package`; pass --out with an \
+            "{} is not empty and was not written by `fnr package`; pass --out with an \
              empty or new folder",
             out.display()
         );
@@ -460,7 +460,7 @@ fn python_files(
     let wrapper = wrapper_dir.join(&wrapper_name);
     if !wrapper.join("__init__.py").exists() {
         bail!(
-            "{} has no __init__.py; run `rust-anything refresh {}`",
+            "{} has no __init__.py; run `fnr refresh {}`",
             wrapper.display(),
             crate_dir.display()
         );
@@ -533,14 +533,14 @@ fn napi_files(
     let lib = manifest.lib_name();
     let index = std::fs::read_to_string(crate_dir.join("index.cjs")).with_context(|| {
         format!(
-            "reading index.cjs (run `rust-anything refresh {}`)",
+            "reading index.cjs (run `fnr refresh {}`)",
             crate_dir.display()
         )
     })?;
     let load = format!("require('./{lib}.node')");
     if !index.contains(&load) {
         bail!(
-            "index.cjs does not load `./{lib}.node`; run `rust-anything refresh {}` to regenerate it",
+            "index.cjs does not load `./{lib}.node`; run `fnr refresh {}` to regenerate it",
             crate_dir.display()
         );
     }
@@ -621,7 +621,7 @@ fn napi_files(
             ));
             if crate::harness::sources_newer_than(crate_dir, &built) {
                 notes.push(format!(
-                    "{} is older than the crate's sources; run `rust-anything build {}` and \
+                    "{} is older than the crate's sources; run `fnr build {}` and \
                      package again",
                     built.display(),
                     crate_dir.display()
@@ -634,7 +634,7 @@ fn napi_files(
             ));
         }
         Some(_) => notes.push(format!(
-            "No {lib}.node in the crate: run `rust-anything build {}` and package again to try \
+            "No {lib}.node in the crate: run `fnr build {}` and package again to try \
              the package on this machine.",
             crate_dir.display()
         )),
@@ -761,7 +761,7 @@ fn wasm_files(
     let lib = manifest.lib_name();
     if !pkg.join(format!("{lib}.js")).exists() {
         bail!(
-            "no wasm build in {}; run `rust-anything build {}` first",
+            "no wasm build in {}; run `fnr build {}` first",
             pkg.display(),
             crate_dir.display()
         );

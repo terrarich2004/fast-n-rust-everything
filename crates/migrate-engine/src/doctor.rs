@@ -248,7 +248,7 @@ const RUNTIMES: &[Runtime] = &[
         name: "cargo",
         program: "cargo",
         args: &["--version"],
-        minimum: Some(Version(1, 97, 0)),
+        minimum: Some(Version(1, 89, 0)),
         required: true,
         java: false,
         fix: [
@@ -538,7 +538,7 @@ fn runtime_check(
     let mut detail = match (banner, r.minimum) {
         (None, _) => format!("`{}` not found or did not run", r.program),
         (Some(b), Some(min)) if status == Status::Outdated => {
-            format!("{b}; rust-anything needs {}.{}+", min.0, min.1)
+            format!("{b}; fast-n-rust needs {}.{}+", min.0, min.1)
         }
         (Some(b), _) => b.to_string(),
     };
@@ -684,7 +684,7 @@ fn mcp_self_test(exe: &Path) -> Check {
         detail,
         fix: (status != Status::Ok).then(|| {
             format!(
-                "run `{} mcp` by hand and look at what it prints; reinstall with `cargo install rust-anything`",
+                "run `{} mcp` by hand and look at what it prints; reinstall with `cargo install --git https://github.com/terrarich2004/fast-n-rust-everything fast-n-rust`",
                 quoted(exe)
             )
         }),

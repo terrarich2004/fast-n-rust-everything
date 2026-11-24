@@ -23,10 +23,15 @@ var (
 	faOn_/*S*/   bool
 )
 
+func faEnvOn_/*S*/(name string) bool {
+	s := strings.TrimSpace(os.Getenv(name))
+	return s != "" && s != "0" && !strings.EqualFold(s, "false")
+}
+
 func faFast_/*S*/(/*PARAMS*/) (/*RET*/, bool) {
 	var zero /*RET*/
 	faOnce_/*S*/.Do(func() {
-		if os.Getenv("FNR_DISABLE") != "" || os.Getenv("FAST_ANYTHING_DISABLE") != "" {
+		if faEnvOn_/*S*/("FNR_DISABLE") || faEnvOn_/*S*/("FAST_ANYTHING_DISABLE") {
 			return
 		}
 		if dir := os.Getenv("FNR_LIB_DIR"); dir != "" {

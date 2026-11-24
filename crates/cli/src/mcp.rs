@@ -186,26 +186,29 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn parse_root_uri_or_path(raw: &str) -> Option<PathBuf> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let path_str = if let Some(rest) = trimmed.strip_prefix("file://") {
+fn strip_file_uri(raw: &str, windows: bool) -> String {
+    if let Some(rest) = raw.strip_prefix("file://") {
         let decoded = percent_decode(rest);
-        if let Some(stripped) = decoded.strip_prefix("localhost/") {
-            format!("/{stripped}")
-        } else if cfg!(windows)
-            && decoded.starts_with('/')
-            && decoded.as_bytes().get(2) == Some(&b':')
-        {
+        let decoded = decoded
+            .strip_prefix("localhost/")
+            .map(|stripped| format!("/{stripped}"))
+            .unwrap_or(decoded);
+        if windows && decoded.starts_with('/') && decoded.as_bytes().get(2) == Some(&b':') {
             decoded[1..].to_string()
         } else {
             decoded
         }
     } else {
-        trimmed.to_string()
-    };
+        raw.to_string()
+    }
+}
+
+fn parse_root_uri_or_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path_str = strip_file_uri(trimmed, cfg!(windows));
     let pb = PathBuf::from(path_str);
     pb.is_dir().then_some(pb)
 }
@@ -302,14 +305,40 @@ pub fn serve_io_with_mode<R: BufRead, W: Write + Send + 'static>(
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(id_key.clone());
 
-            let permit = limiter.acquire();
+            let lim = Arc::clone(&limiter);
             let w = Arc::clone(&writer);
             let canc = Arc::clone(&cancelled);
             let inf = Arc::clone(&inflight);
             let sess = Arc::clone(&session);
             let req_owned = req.clone();
             handles.push(std::thread::spawn(move || {
-                let _permit = permit;
+                if canc
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&id_key)
+                {
+                    inf.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id_key);
+                    canc.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id_key);
+                    return;
+                }
+                let _permit = lim.acquire();
+                if canc
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&id_key)
+                {
+                    inf.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id_key);
+                    canc.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id_key);
+                    return;
+                }
                 let tool_name = req_owned["params"]["name"].as_str().unwrap_or("");
                 let tool_args = &req_owned["params"]["arguments"];
                 let ws_lock = if is_read_only_call(tool_name, tool_args) {
@@ -603,7 +632,7 @@ pub fn compact_tools() -> Value {
                 "lang": { "type": "string" }
             }),
             req_action.clone(),
-            true,
+            false,
             false,
             false,
         ),
@@ -662,6 +691,9 @@ pub fn compact_tools() -> Value {
                 "force": { "type": "boolean" },
                 "pgo": { "type": "boolean" },
                 "native_cpu": { "type": "boolean" },
+                "cache": { "type": "boolean" },
+                "ports": { "type": "boolean" },
+                "rust": { "type": "boolean" },
                 "all": { "type": "boolean" },
                 "dry_run": { "type": "boolean" }
             }),
@@ -747,8 +779,8 @@ pub fn tools() -> Value {
         tool(
             "scan",
             "Profile an app and rank portable hotspots with Mode Advisor (fast vs batch vs whole-app).",
-            json!({ "root": root_p, "command": cmd_p }),
-            json!(["command"]),
+            json!({ "root": root_p, "command": cmd_p, "cdb": { "type": "string", "description": "C/C++ compile_commands.json path." } }),
+            json!([]),
             false,
             false,
             true
@@ -765,7 +797,13 @@ pub fn tools() -> Value {
         tool(
             "verify",
             "Release-build a hotspot port, replay recorded + derived edge cases, and optionally run `gate` checks.",
-            json!({ "root": root_p, "id": id_p, "all": { "type": "boolean" }, "gate": { "type": "boolean" } }),
+            json!({
+                "root": root_p, "id": id_p, "target": { "type": "string" },
+                "all": { "type": "boolean" }, "gate": { "type": "boolean" },
+                "float_tolerance": { "type": "number" }, "known_diffs": { "type": "string" },
+                "min_speedup": { "type": "number" }, "fuzz_cases": { "type": "integer" },
+                "seed": { "type": "integer" }, "save_regressions": { "type": "boolean" }
+            }),
             json!([]),
             false,
             false,
@@ -775,7 +813,7 @@ pub fn tools() -> Value {
             "go",
             "End-to-end hotspot loop (scan -> port -> agent -> verify -> optional strict gate -> enable -> bench) or unit mode.",
             json!({
-                "root": root_p, "command": cmd_p,
+                "root": root_p, "command": cmd_p, "cdb": { "type": "string" },
                 "mode": { "type": "string", "enum": ["fast", "unit"] },
                 "agent": { "type": "string" },
                 "top": { "type": "integer" },
@@ -783,10 +821,12 @@ pub fn tools() -> Value {
                 "runs": { "type": "integer" },
                 "samples": { "type": "integer" },
                 "strict": { "type": "boolean" },
+                "float_tolerance": { "type": "number" },
+                "min_speedup": { "type": "number" },
                 "function": { "type": "string" },
                 "lang": { "type": "string" }
             }),
-            json!(["command"]),
+            json!([]),
             false,
             false,
             false
@@ -794,7 +834,11 @@ pub fn tools() -> Value {
         tool(
             "enable",
             "Enable a verified hotspot port OR unit crate in place (reversible via `disable` or `FNR_DISABLE=1`).",
-            json!({ "root": root_p, "target": { "type": "string", "description": "Hotspot id or unit crate directory." }, "force": { "type": "boolean" } }),
+            json!({
+                "root": root_p, "target": { "type": "string", "description": "Hotspot id or unit crate directory." },
+                "crate": crate_p, "force": { "type": "boolean" },
+                "pgo": { "type": "boolean" }, "native_cpu": { "type": "boolean" }
+            }),
             json!([]),
             false,
             false,
@@ -803,7 +847,7 @@ pub fn tools() -> Value {
         tool(
             "disable",
             "Disable a hotspot port (`all: true` disables all) or unit crate, restoring source files byte-for-byte.",
-            json!({ "root": root_p, "target": { "type": "string" }, "all": { "type": "boolean" } }),
+            json!({ "root": root_p, "target": { "type": "string" }, "crate": crate_p, "all": { "type": "boolean" } }),
             json!([]),
             false,
             false,
@@ -812,7 +856,11 @@ pub fn tools() -> Value {
         tool(
             "bench",
             "Benchmark either the whole app (hotspot mode) or a unit crate (micro-bench).",
-            json!({ "root": root_p, "crate": crate_p, "runs": { "type": "integer" }, "min_ms": { "type": "integer" }, "resolve_from": resolve_from_p, "node_args": node_args_p }),
+            json!({
+                "root": root_p, "crate": crate_p, "runs": { "type": "integer" },
+                "min_ms": { "type": "integer" }, "pgo": { "type": "boolean" },
+                "native_cpu": { "type": "boolean" }, "resolve_from": resolve_from_p, "node_args": node_args_p
+            }),
             json!([]),
             true,
             false,
@@ -889,10 +937,12 @@ pub fn tools() -> Value {
         ),
         tool(
             "build",
-            "Build a unit crate (host or android) or all hotspot crates when `crate` is omitted.",
+            "Build a unit crate (host or android), all hotspot crates, or `--deploy` ship artifacts.",
             json!({
                 "root": root_p, "crate": crate_p,
                 "profile": { "type": "string", "enum": ["host", "android"] },
+                "deploy": { "type": "boolean" },
+                "native_cpu": { "type": "boolean" },
                 "abi": { "type": "array", "items": { "type": "string" } },
                 "api": { "type": "integer" },
                 "ndk": { "type": "string" },
@@ -967,10 +1017,29 @@ pub fn tools() -> Value {
             true
         ),
         tool(
+            "ci",
+            "Run CI quality & speedup gate (`verify`, strict `gate`, optional `fuzz_cases`, `bench`, `min_speedup`).",
+            json!({
+                "root": root_p, "target": { "type": "string" }, "id": id_p,
+                "float_tolerance": { "type": "number" }, "fuzz_cases": { "type": "integer" },
+                "bench": { "type": "boolean" }, "runs": { "type": "integer" },
+                "min_speedup": { "type": "number" }, "native_cpu": { "type": "boolean" }
+            }),
+            json!([]),
+            false,
+            false,
+            true
+        ),
+        tool(
             "package",
-            "Generate a distributable npm or Python wheel package skeleton for a unit crate.",
-            json!({ "crate": crate_p, "name": { "type": "string" }, "version": { "type": "string" }, "out": { "type": "string" }, "dry_run": { "type": "boolean" }, "fallback": { "type": "string" }, "bin": { "type": "array", "items": { "type": "string" } }, "original": { "type": "string" } }),
-            json!(["crate"]),
+            "Package a verified hotspot port (`dist/<ext>`) or generate an npm/wheel package for a unit crate.",
+            json!({
+                "root": root_p, "target": { "type": "string" }, "id": id_p, "crate": crate_p,
+                "name": { "type": "string" }, "version": { "type": "string" }, "out": { "type": "string" },
+                "dry_run": { "type": "boolean" }, "native_cpu": { "type": "boolean" },
+                "fallback": { "type": "string" }, "bin": { "type": "array", "items": { "type": "string" } }, "original": { "type": "string" }
+            }),
+            json!([]),
             false,
             false,
             true
@@ -1050,6 +1119,21 @@ pub fn tools() -> Value {
     ])
 }
 
+fn batch_strings(args: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["batch_list", "batch"] {
+        if let Some(arr) = args[key].as_array() {
+            out.extend(arr.iter().filter_map(|v| v.as_str().map(str::to_string)));
+        } else if let Some(s) = args[key].as_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
 fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Result<Value> {
     let root = args["root"]
         .as_str()
@@ -1073,6 +1157,7 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
             })
             .unwrap_or_default()
     };
+    let batch_args = || -> Vec<String> { batch_strings(args) };
 
     Ok(match name {
         "inspect" => {
@@ -1085,25 +1170,25 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
         }
         "check" => {
             let action = args["action"].as_str().context("missing `action`")?;
-            if action == "ci" {
-                let target = args["target"]
-                    .as_str()
-                    .or_else(|| args["id"].as_str())
-                    .map(str::to_string);
-                return Ok(serde_json::to_value(synergy::run_ci(
-                    &root,
-                    synergy::CiOptions {
-                        target,
-                        float_tolerance: args["float_tolerance"].as_f64(),
-                        fuzz: args["fuzz_cases"].as_u64().unwrap_or(0) as usize,
-                        bench: args["bench"].as_bool().unwrap_or(false),
-                        runs: args["runs"].as_u64().unwrap_or(5) as usize,
-                        min_speedup: args["min_speedup"].as_f64(),
-                        native_cpu: args["native_cpu"].as_bool().unwrap_or(false),
-                    },
-                )?)?);
-            }
             return call_with_default_root(action, args, default_root);
+        }
+        "ci" => {
+            let target = args["target"]
+                .as_str()
+                .or_else(|| args["id"].as_str())
+                .map(str::to_string);
+            serde_json::to_value(synergy::run_ci(
+                &root,
+                synergy::CiOptions {
+                    target,
+                    float_tolerance: args["float_tolerance"].as_f64(),
+                    fuzz: args["fuzz_cases"].as_u64().unwrap_or(0) as usize,
+                    bench: args["bench"].as_bool().unwrap_or(false),
+                    runs: args["runs"].as_u64().unwrap_or(5) as usize,
+                    min_speedup: args["min_speedup"].as_f64(),
+                    native_cpu: args["native_cpu"].as_bool().unwrap_or(false),
+                },
+            )?)?
         }
         "switch" => {
             let action = args["action"].as_str().context("missing `action`")?;
@@ -1379,13 +1464,13 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
             force: args["force"].as_bool().unwrap_or(false),
             keep: strings("keep"),
             lang: None,
-            batch: strings("batch"),
+            batch: batch_args(),
             as_json: strings("as_json"),
             allocator: bridge::Allocator::default(),
         })?)?,
         "refresh" => {
             let c = req_path("crate")?;
-            let batch = strings("batch");
+            let batch = batch_args();
             serde_json::to_value(if batch.is_empty() {
                 bridge::refresh(&c)?
             } else {
@@ -1686,7 +1771,7 @@ mod tests {
             ToolMode::Full,
         )
         .unwrap();
-        assert_eq!(list_full["result"]["tools"].as_array().unwrap().len(), 29);
+        assert_eq!(list_full["result"]["tools"].as_array().unwrap().len(), 30);
 
         let inspect_doc = handle(&json!({
             "jsonrpc": "2.0",
@@ -1846,5 +1931,107 @@ mod tests {
         assert!(lines[2].ends_with(":start") && lines[3].ends_with(":end"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn serve_io_answers_ping_and_cancels_when_worker_pool_is_full() {
+        #[derive(Clone)]
+        struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+        impl Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).write(buf)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut reqs = Vec::new();
+        for i in 1..=MAX_CONCURRENT_WORKERS {
+            reqs.push(json!({
+                "jsonrpc": "2.0",
+                "id": i,
+                "method": "tools/call",
+                "params": { "name": "test_sleep", "arguments": { "ms": 120 } }
+            }));
+        }
+        reqs.push(json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": { "name": "test_sleep", "arguments": { "ms": 80 } }
+        }));
+        reqs.push(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": { "requestId": 99 }
+        }));
+        reqs.push(json!({ "jsonrpc": "2.0", "id": 100, "method": "ping" }));
+
+        let wire = reqs
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        serve_io(BufReader::new(wire.as_bytes()), SharedBuf(Arc::clone(&buf))).unwrap();
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let ids: Vec<Value> = out
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<Value>(l).unwrap()["id"].clone())
+            .collect();
+        assert!(
+            ids.contains(&json!(100)),
+            "ping must be answered even when worker pool is saturated: {out}"
+        );
+        assert!(
+            !ids.contains(&json!(99)),
+            "queued 9th worker cancelled before execution must be suppressed: {out}"
+        );
+    }
+
+    #[test]
+    fn windows_localhost_file_uri_and_schemas_and_batch_strings() {
+        assert_eq!(strip_file_uri("file://localhost/C:/repo", true), "C:/repo");
+        assert_eq!(strip_file_uri("file:///C:/repo", true), "C:/repo");
+        assert_eq!(
+            strip_file_uri("file://localhost/tmp/repo", false),
+            "/tmp/repo"
+        );
+
+        assert_eq!(
+            batch_strings(&json!({ "batch_list": ["dedupe:names"] })),
+            vec!["dedupe:names"]
+        );
+        assert_eq!(
+            batch_strings(&json!({ "batch": "dedupe:names" })),
+            vec!["dedupe:names"]
+        );
+        assert_eq!(
+            batch_strings(&json!({ "batch": ["a:x", "b:y"] })),
+            vec!["a:x", "b:y"]
+        );
+
+        let compact = compact_tools();
+        let compact_arr = compact.as_array().unwrap();
+        let inspect = compact_arr.iter().find(|t| t["name"] == "inspect").unwrap();
+        assert_eq!(inspect["annotations"]["readOnlyHint"], false);
+        let switch = compact_arr.iter().find(|t| t["name"] == "switch").unwrap();
+        assert!(switch["inputSchema"]["properties"]["cache"].is_object());
+        assert!(switch["inputSchema"]["properties"]["ports"].is_object());
+        assert!(switch["inputSchema"]["properties"]["rust"].is_object());
+
+        let full = tools();
+        let full_arr = full.as_array().unwrap();
+        assert!(full_arr.iter().any(|t| t["name"] == "ci"));
+        let build = full_arr.iter().find(|t| t["name"] == "build").unwrap();
+        assert!(build["inputSchema"]["properties"]["deploy"].is_object());
+        assert!(build["inputSchema"]["properties"]["native_cpu"].is_object());
+        let pkg = full_arr.iter().find(|t| t["name"] == "package").unwrap();
+        assert_eq!(pkg["inputSchema"]["required"], json!([]));
+        assert!(pkg["inputSchema"]["properties"]["target"].is_object());
+        assert!(pkg["inputSchema"]["properties"]["native_cpu"].is_object());
     }
 }

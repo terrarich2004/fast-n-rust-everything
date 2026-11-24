@@ -895,7 +895,7 @@ pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
                 port.func
             ),
             format!(
-                "process.getBuiltinModule(\"node:module\").createRequire(import.meta.url)(process.getBuiltinModule(\"node:path\").join(process.env.FNR_LIB_DIR, \"{addon_name}\")).{}",
+                "process.getBuiltinModule(\"node:module\").createRequire(import.meta.url)(process.getBuiltinModule(\"node:path\").resolve(process.env.FNR_LIB_DIR, \"{addon_name}\")).{}",
                 port.func
             ),
         )
@@ -903,7 +903,7 @@ pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
         (
             format!("require(\"{addon_rel}\").{}", port.func),
             format!(
-                "require(require(\"node:path\").join(process.env.FNR_LIB_DIR, \"{addon_name}\")).{}",
+                "require(require(\"node:path\").resolve(process.env.FNR_LIB_DIR, \"{addon_name}\")).{}",
                 port.func
             ),
         )
@@ -939,7 +939,7 @@ pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
     let mut lines = vec![
         "// Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the JavaScript above instead.".to_string(),
         format!("// Undo with:  fnr disable {}", port.id),
-        "if (!process.env.FNR_DISABLE && !process.env.FAST_ANYTHING_DISABLE) {".to_string(),
+        "if (!((v) => v && v !== \"0\" && v.toLowerCase() !== \"false\")(process.env.FNR_DISABLE) && !((v) => v && v !== \"0\" && v.toLowerCase() !== \"false\")(process.env.FAST_ANYTHING_DISABLE)) {".to_string(),
         "  try {".to_string(),
     ];
     lines.extend(assign_lines);
@@ -1369,5 +1369,9 @@ mod tests {
         let original = "export function levenshtein(a, b) {\n  return 0;\n}\n";
         let on = backend::append_marked(original, "//", &port.id, &esm);
         assert_eq!(backend::strip_marked(&on, "//", &port.id), original);
+        assert!(esm.contains(".resolve(process.env.FNR_LIB_DIR,"));
+        let cjs = shim(&port, "./x.node", false);
+        assert!(cjs.contains("require(\"node:path\").resolve(process.env.FNR_LIB_DIR,"));
+        assert!(cjs.contains("v !== \"0\" && v.toLowerCase() !== \"false\""));
     }
 }
