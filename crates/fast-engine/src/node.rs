@@ -158,9 +158,151 @@ fn entry(args: &[String]) -> Option<&String> {
     None
 }
 
-/// Unwrap `tsx app.ts` or `npx [-y] tsx|ts-node|node app.ts` into `node [--import ...] app.ts`.
-pub fn unwrap_node_runner(command: &[String], root: &Path) -> Option<Vec<String>> {
-    let stem = crate::util::program_stem(command.first()?);
+/// Split a `package.json` script string into argv tokens, returning `None` if it uses shell operators.
+fn split_script_words(cmd: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some('\\') => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            Some(_) if c == '\\' => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            Some(_) => cur.push(c),
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+            }
+            None if matches!(c, '&' | '|' | ';' | '>' | '<' | '`') => return None,
+            None if c == '$' && chars.peek() == Some(&'(') => return None,
+            None => cur.push(c),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    Some(words)
+}
+
+fn is_env_assignment(word: &str) -> bool {
+    let Some((key, _)) = word.split_once('=') else {
+        return false;
+    };
+    !key.is_empty()
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !key.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+fn resolve_node_loader(root: &Path, spec: &str) -> Option<String> {
+    let script = format!("console.log(import.meta.resolve({spec:?}))");
+    Command::new("node")
+        .args(["-e", &script])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn read_pkg_script(root: &Path, script: &str) -> Result<String> {
+    let pkg_path = root.join("package.json");
+    let text = fs::read_to_string(&pkg_path)
+        .with_context(|| format!("couldn't read {} to unwrap `{script}`", pkg_path.display()))?;
+    let val: Value = serde_json::from_str(&text)
+        .with_context(|| format!("invalid JSON in {}", pkg_path.display()))?;
+    val.get("scripts")
+        .and_then(|s| s.get(script))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .with_context(|| format!("script `{script}` not found in {}", pkg_path.display()))
+}
+
+fn unwrap_pkg_manager(command: &[String], root: &Path) -> Result<Option<Vec<String>>> {
+    let mgr = crate::util::program_stem(command.first().map(String::as_str).unwrap_or_default());
+    if !matches!(mgr.as_str(), "npm" | "pnpm" | "yarn") {
+        return Ok(None);
+    }
+    let Some(arg1) = command.get(1).map(String::as_str) else {
+        return Ok(None);
+    };
+    let (script_name, extra_start) = match (mgr.as_str(), arg1) {
+        ("npm", "run" | "run-script") => (
+            command
+                .get(2)
+                .map(String::as_str)
+                .context("name the script after `npm run`, e.g. `fnr scan -- npm run start`")?,
+            3usize,
+        ),
+        ("npm", "start" | "test") => (arg1, 2usize),
+        ("pnpm" | "yarn", "run") => (
+            command.get(2).map(String::as_str).with_context(|| {
+                format!("name the script after `{mgr} run`, e.g. `fnr scan -- {mgr} run start`")
+            })?,
+            3usize,
+        ),
+        ("pnpm" | "yarn", s) if !s.starts_with('-') => (s, 2usize),
+        _ => return Ok(None),
+    };
+    let raw_script = read_pkg_script(root, script_name)?;
+    let Some(mut words) = split_script_words(&raw_script) else {
+        bail!(
+            "`{mgr} {script_name}` runs a compound shell command (`{raw_script}`). Pass the inner command directly instead, e.g. `fnr scan -- node app.js`."
+        );
+    };
+    if words.is_empty() {
+        bail!("script `{script_name}` in package.json is empty");
+    }
+    if let Some(first_env) = words.first().filter(|w| is_env_assignment(w)).cloned() {
+        let rest = words[1..].join(" ");
+        bail!(
+            "`{mgr} {script_name}` sets environment variable `{first_env}`. Set it in your shell and run the inner command directly:\n    {first_env} fnr scan -- {rest}"
+        );
+    }
+    let tool = crate::util::program_stem(&words[0]);
+    if matches!(
+        tool.as_str(),
+        "vite" | "next" | "webpack" | "nuxt" | "astro" | "react-scripts" | "remix" | "svelte-kit"
+    ) {
+        bail!(
+            "`{script_name}` runs a dev bundler (`{tool}`), which wraps your app in a build server. Profile your backend script or a CPU workload directly (e.g. `fnr scan -- node bench.ts` or `fnr scan --duration 10 -- tsx server.ts`)."
+        );
+    }
+    let mut tail = &command[extra_start..];
+    if tail.first().is_some_and(|a| a == "--") {
+        tail = &tail[1..];
+    }
+    words.extend(tail.iter().cloned());
+    if let Some(inner) = unwrap_node_runner(&words, root)? {
+        Ok(Some(inner))
+    } else {
+        Ok(Some(words))
+    }
+}
+
+/// Unwrap `npm`/`pnpm`/`yarn`, `tsx`, `ts-node`, or `npx [-y] tsx|ts-node|node` into a direct runtime command.
+pub fn unwrap_node_runner(command: &[String], root: &Path) -> Result<Option<Vec<String>>> {
+    if let Some(unwrapped) = unwrap_pkg_manager(command, root)? {
+        return Ok(Some(unwrapped));
+    }
+    let Some(first) = command.first() else {
+        return Ok(None);
+    };
+    let stem = crate::util::program_stem(first);
     let rest: &[String] = if stem == "npx" {
         let mut slice = &command[1..];
         while slice.first().is_some_and(|a| a == "-y" || a == "--yes") {
@@ -170,33 +312,39 @@ pub fn unwrap_node_runner(command: &[String], root: &Path) -> Option<Vec<String>
     } else {
         command
     };
-    let tool = crate::util::program_stem(rest.first()?);
+    let Some(tool_raw) = rest.first() else {
+        return Ok(None);
+    };
+    let tool = crate::util::program_stem(tool_raw);
     let tail_args = &rest[1..];
     if matches!(tool.as_str(), "node" | "nodejs") && stem == "npx" && !tail_args.is_empty() {
-        return Some(
+        return Ok(Some(
             std::iter::once("node".to_string())
                 .chain(tail_args.iter().cloned())
                 .collect(),
-        );
+        ));
     }
     if tool == "tsx" && !tail_args.is_empty() {
-        let resolved = Command::new("node")
-            .args(["-e", "console.log(import.meta.resolve('tsx'))"])
-            .current_dir(root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty());
         let mut out = vec!["node".to_string()];
-        if let Some(loader_url) = resolved {
+        if let Some(loader_url) = resolve_node_loader(root, "tsx") {
             out.push("--import".into());
             out.push(loader_url);
         }
         out.extend(tail_args.iter().cloned());
-        return Some(out);
+        return Ok(Some(out));
     }
-    None
+    if tool == "ts-node" && !tail_args.is_empty() {
+        let mut out = vec!["node".to_string()];
+        if let Some(loader_url) = resolve_node_loader(root, "ts-node/esm")
+            .or_else(|| resolve_node_loader(root, "ts-node/register"))
+        {
+            out.push("--import".into());
+            out.push(loader_url);
+        }
+        out.extend(tail_args.iter().cloned());
+        return Ok(Some(out));
+    }
+    Ok(None)
 }
 
 /// Extract loader/import flags before the entry script (e.g. `--import ...`) so `verify`/`fuzz`
@@ -888,14 +1036,16 @@ fn target(name: &str, owner: Option<&str>, instance_method: bool) -> String {
 pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
     let addon_name = addon_rel.rsplit('/').next().unwrap_or(addon_rel);
     let target_expr = target(&port.func, port.owner.as_deref(), port.instance_method);
+    let req_alias = format!("_fnr_req_{}", port.ext);
+    let res_alias = format!("_fnr_res_{}", port.ext);
     let (load_default, load_override) = if esm {
         (
             format!(
-                "process.getBuiltinModule(\"node:module\").createRequire(import.meta.url)(\"{addon_rel}\").{}",
+                "{req_alias}(import.meta.url)(\"{addon_rel}\").{}",
                 port.func
             ),
             format!(
-                "process.getBuiltinModule(\"node:module\").createRequire(import.meta.url)(process.getBuiltinModule(\"node:path\").resolve(process.env.FNR_LIB_DIR, \"{addon_name}\")).{}",
+                "{req_alias}(import.meta.url)({res_alias}(process.env.FNR_LIB_DIR, \"{addon_name}\")).{}",
                 port.func
             ),
         )
@@ -939,9 +1089,19 @@ pub fn shim(port: &Port, addon_rel: &str, esm: bool) -> String {
     let mut lines = vec![
         "// Uses the verified Rust port. FNR_DISABLE=1 (or FAST_ANYTHING_DISABLE=1) runs the JavaScript above instead.".to_string(),
         format!("// Undo with:  fnr disable {}", port.id),
+    ];
+    if esm {
+        lines.push(format!(
+            "import {{ createRequire as {req_alias} }} from \"node:module\";"
+        ));
+        lines.push(format!(
+            "import {{ resolve as {res_alias} }} from \"node:path\";"
+        ));
+    }
+    lines.extend([
         "if (!((v) => v && v !== \"0\" && v.toLowerCase() !== \"false\")(process.env.FNR_DISABLE) && !((v) => v && v !== \"0\" && v.toLowerCase() !== \"false\")(process.env.FAST_ANYTHING_DISABLE)) {".to_string(),
         "  try {".to_string(),
-    ];
+    ]);
     lines.extend(assign_lines);
     lines.extend([
         "  } catch (_err) {".to_string(),
@@ -1325,7 +1485,13 @@ mod tests {
         };
         let block = shim(&port, "./x.node", true);
         assert!(
-            block.contains("Text.pairs = process.getBuiltinModule"),
+            block.contains(
+                "import { createRequire as _fnr_req_fa_lib_text_pairs } from \"node:module\";"
+            ),
+            "{block}"
+        );
+        assert!(
+            block.contains("Text.pairs = _fnr_req_fa_lib_text_pairs(import.meta.url)"),
             "{block}"
         );
         assert!(block.contains("(\"./x.node\").pairs;"), "{block}");
@@ -1359,8 +1525,12 @@ mod tests {
             build_profile: None,
         };
         let esm = shim(&port, "./.fast/lib/fa_fuzzy_levenshtein.node", true);
+        assert!(!esm.contains("getBuiltinModule"), "{esm}");
         assert!(esm.contains(
-            "createRequire(import.meta.url)(\"./.fast/lib/fa_fuzzy_levenshtein.node\").levenshtein"
+            "import { createRequire as _fnr_req_fa_fuzzy_levenshtein } from \"node:module\";"
+        ));
+        assert!(esm.contains(
+            "_fnr_req_fa_fuzzy_levenshtein(import.meta.url)(\"./.fast/lib/fa_fuzzy_levenshtein.node\").levenshtein"
         ));
         assert!(
             shim(&port, "./x.node", false)
@@ -1369,9 +1539,111 @@ mod tests {
         let original = "export function levenshtein(a, b) {\n  return 0;\n}\n";
         let on = backend::append_marked(original, "//", &port.id, &esm);
         assert_eq!(backend::strip_marked(&on, "//", &port.id), original);
-        assert!(esm.contains(".resolve(process.env.FNR_LIB_DIR,"));
+        assert!(esm.contains("_fnr_res_fa_fuzzy_levenshtein(process.env.FNR_LIB_DIR,"));
         let cjs = shim(&port, "./x.node", false);
         assert!(cjs.contains("require(\"node:path\").resolve(process.env.FNR_LIB_DIR,"));
         assert!(cjs.contains("v !== \"0\" && v.toLowerCase() !== \"false\""));
+    }
+
+    #[test]
+    fn multiple_esm_shims_use_unique_import_aliases() {
+        let p1 = Port {
+            id: "fuzzy.one".into(),
+            file: "fuzzy.mjs".into(),
+            module: "fuzzy".into(),
+            func: "one".into(),
+            ext: "fa_fuzzy_one".into(),
+            crate_dir: ".fast/ports/fuzzy.one".into(),
+            recorded: 1,
+            calls_seen: 1,
+            verify: None,
+            enabled: false,
+            lang: backend::Lang::Node,
+            owner: None,
+            instance_method: false,
+            self_fields: vec![],
+            line: 1,
+            sources: vec![],
+            build_profile: None,
+        };
+        let p2 = Port {
+            id: "fuzzy.two".into(),
+            func: "two".into(),
+            ext: "fa_fuzzy_two".into(),
+            crate_dir: ".fast/ports/fuzzy.two".into(),
+            ..p1.clone()
+        };
+        let combined = format!(
+            "{}\n{}",
+            shim(&p1, "./a.node", true),
+            shim(&p2, "./b.node", true)
+        );
+        assert!(combined.contains("_fnr_req_fa_fuzzy_one"));
+        assert!(combined.contains("_fnr_req_fa_fuzzy_two"));
+        assert!(combined.contains("_fnr_res_fa_fuzzy_one"));
+        assert!(combined.contains("_fnr_res_fa_fuzzy_two"));
+    }
+
+    #[test]
+    fn unwraps_package_manager_and_ts_runners() {
+        let dir = std::env::temp_dir().join(format!("fnr-node-unwrap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{
+              "scripts": {
+                "start": "node server.js --port 3000",
+                "bench": "tsx bench.ts",
+                "dev": "vite --port 5173",
+                "complex": "node a.js && node b.js",
+                "envrun": "NODE_ENV=production node app.js"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let cmd = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        assert_eq!(
+            unwrap_node_runner(&cmd("npm run start"), &dir)
+                .unwrap()
+                .unwrap(),
+            cmd("node server.js --port 3000")
+        );
+        assert_eq!(
+            unwrap_node_runner(&cmd("pnpm bench -- --fast"), &dir)
+                .unwrap()
+                .unwrap()
+                .first()
+                .map(String::as_str),
+            Some("node")
+        );
+        assert!(
+            unwrap_node_runner(&cmd("yarn dev"), &dir)
+                .unwrap_err()
+                .to_string()
+                .contains("dev bundler")
+        );
+        assert!(
+            unwrap_node_runner(&cmd("npm run complex"), &dir)
+                .unwrap_err()
+                .to_string()
+                .contains("compound shell command")
+        );
+        assert!(
+            unwrap_node_runner(&cmd("npm run envrun"), &dir)
+                .unwrap_err()
+                .to_string()
+                .contains("NODE_ENV=production")
+        );
+        assert_eq!(
+            unwrap_node_runner(&cmd("npx -y ts-node app.ts"), &dir)
+                .unwrap()
+                .unwrap()
+                .last()
+                .map(String::as_str),
+            Some("app.ts")
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

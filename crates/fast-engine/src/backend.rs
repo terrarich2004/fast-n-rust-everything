@@ -53,6 +53,12 @@ fn wrapper_hint(program: &str) -> Option<&'static str> {
         "tsx" | "ts-node" | "npx" => {
             "Node.js 22.6+ runs TypeScript itself, and fast-n-rust needs node to start the app:\n    fnr scan -- node app.ts"
         }
+        "next" | "vite" | "webpack" | "nuxt" | "astro" => {
+            "Dev bundlers wrap your app in a build server. Profile your backend script or a CPU workload directly:\n    fnr scan -- node bench.ts  (or `fnr scan --duration 10 -- tsx server.ts`)"
+        }
+        "fastapi" => {
+            "Run FastAPI via uvicorn or python directly so fnr can attach cProfile:\n    fnr scan --duration 10 -- uvicorn app:app"
+        }
         "bundle" => {
             "bundle exec sets up gems for its own process only. Scan with ruby directly, and if the app needs Bundler, put  require \"bundler/setup\"  at the top of its script:\n    fnr scan -- ruby app.rb"
         }
@@ -939,6 +945,18 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("bundler/setup")
+        );
+        assert!(
+            Lang::detect("vite")
+                .unwrap_err()
+                .to_string()
+                .contains("Dev bundlers")
+        );
+        assert!(
+            Lang::detect("fastapi")
+                .unwrap_err()
+                .to_string()
+                .contains("uvicorn")
         );
         assert!(
             Lang::detect("cobol")

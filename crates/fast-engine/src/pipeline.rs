@@ -35,7 +35,7 @@ pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
             ));
             unwrapped
         }
-        None => match crate::node::unwrap_node_runner(&command, &ctx.root) {
+        None => match crate::python::unwrap_python_tool(&command, &ctx.root) {
             Some(unwrapped) => {
                 ui::step(format!(
                     "{} runs {}",
@@ -44,7 +44,17 @@ pub fn scan(root: &Path, command: Vec<String>) -> Result<ScanOut> {
                 ));
                 unwrapped
             }
-            None => command,
+            None => match crate::node::unwrap_node_runner(&command, &ctx.root)? {
+                Some(unwrapped) => {
+                    ui::step(format!(
+                        "{} runs {}",
+                        ui::bold(&command[0]),
+                        ui::bold(unwrapped.join(" "))
+                    ));
+                    unwrapped
+                }
+                None => command,
+            },
         },
     };
     let lang = crate::cfamily::refine(Lang::detect(&command[0])?, &command[1..]);

@@ -33,7 +33,7 @@ fn minimum(name: &str) -> &'static [u32] {
     match name {
         "cargo" => &[1, 85], // ports use edition 2024
         "python" => &[3, 10],
-        "node" => &[22],
+        "node" => &[20],
         "ruby" => &[3, 3],
         "java" => &[22],
         "go" => &[1, 22],

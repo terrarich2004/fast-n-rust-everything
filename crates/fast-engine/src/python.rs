@@ -25,6 +25,40 @@ pub fn is_python(program: &str) -> bool {
 
 /// Tools that run a command inside a project's virtualenv: `uv run app.py`, `poetry run python app.py`.
 const ENV_RUNNERS: &[&str] = &["uv", "poetry", "pipenv", "pdm", "hatch", "rye"];
+const PYTHON_MODULE_TOOLS: &[&str] = &["pytest", "uvicorn", "flask", "gunicorn"];
+
+fn find_project_python(root: &Path) -> Option<String> {
+    for venv in [".venv", "venv"] {
+        let cand = if cfg!(windows) {
+            root.join(venv).join("Scripts").join("python.exe")
+        } else {
+            root.join(venv).join("bin").join("python")
+        };
+        if cand.is_file() {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Unwrap bare `pytest ...`, `uvicorn ...`, `flask ...`, or `gunicorn ...` into `[python, -m, tool, ...]`.
+pub fn unwrap_python_tool(command: &[String], root: &Path) -> Option<Vec<String>> {
+    let first = command.first()?;
+    let tool = crate::util::program_stem(first);
+    if !PYTHON_MODULE_TOOLS.contains(&tool.as_str()) {
+        return None;
+    }
+    let python = find_project_python(root).unwrap_or_else(|| {
+        if cfg!(windows) {
+            "python".to_string()
+        } else {
+            "python3".to_string()
+        }
+    });
+    let mut out = vec![python, "-m".to_string(), tool];
+    out.extend(command[1..].iter().cloned());
+    Some(out)
+}
 
 /// `uv run [python] app.py ...` (and the other ENV_RUNNERS) as `<the env's python> app.py ...`, so
 /// every later run uses the same interpreter and packages. `query` runs the runner's own python
@@ -43,23 +77,45 @@ pub fn unwrap_env_runner(
         rest = &rest[1..];
     }
     let shown = command[..2].join(" ");
+    let mut module_tool = false;
     match rest.first().map(String::as_str) {
         None => bail!("name the script after {shown}, e.g.  fnr scan -- {shown} app.py"),
         Some(a) if a.starts_with('-') && a != "-m" => bail!(
             "fnr can't pass options to {shown}. Get its interpreter with  {shown} python -c \"import sys; print(sys.executable)\"  and scan with that: fnr scan -- <that python> app.py"
         ),
-        Some(a) if a != "-m" && !a.ends_with(".py") => bail!(
-            "{a} isn't a .py script. Run the code it starts as  {shown} python -m <module>  or  {shown} python <script>.py"
-        ),
-        _ => {}
+        Some(a) => {
+            let tool = crate::util::program_stem(a);
+            if tool == "fastapi" {
+                bail!(
+                    "`{shown} fastapi` wraps uvicorn/your app. Scan directly with `{shown} uvicorn app:app` (with `--duration 10`) or `{shown} app.py`."
+                );
+            }
+            if PYTHON_MODULE_TOOLS.contains(&tool.as_str()) {
+                module_tool = true;
+            } else if a != "-m" && !a.ends_with(".py") {
+                bail!(
+                    "{a} isn't a .py script. Run the code it starts as  {shown} python -m <module>  or  {shown} python <script>.py"
+                );
+            }
+        }
     }
     let mut ask = command[..2].iter().map(String::as_str).collect::<Vec<_>>();
     ask.extend(["python", "-c", "import sys; print(sys.executable)"]);
     let exe = query(&ask)?.trim().to_string();
     ensure!(!exe.is_empty(), "{shown} didn't say which python it uses");
-    Ok(Some(
-        std::iter::once(exe).chain(rest.iter().cloned()).collect(),
-    ))
+    if module_tool {
+        let tool = crate::util::program_stem(&rest[0]);
+        Ok(Some(
+            [exe, "-m".to_string(), tool]
+                .into_iter()
+                .chain(rest[1..].iter().cloned())
+                .collect(),
+        ))
+    } else {
+        Ok(Some(
+            std::iter::once(exe).chain(rest.iter().cloned()).collect(),
+        ))
+    }
 }
 
 /// The absolute interpreter path behind python, python3, py, .venv/bin/python, ...
@@ -1630,13 +1686,49 @@ sys.exit(1 if fails else 0)
                 .to_string()
                 .contains("can't pass options")
         );
+        assert_eq!(
+            got("uv run pytest -q").unwrap().unwrap(),
+            cmd("/proj/.venv-uv/bin/python -m pytest -q")
+        );
+        assert_eq!(
+            got("poetry run uvicorn main:app").unwrap().unwrap(),
+            cmd("/proj/.venv-poetry/bin/python -m uvicorn main:app")
+        );
         assert!(
-            got("uv run pytest")
+            got("uv run mycli")
                 .unwrap_err()
                 .to_string()
                 .contains("isn't a .py script")
         );
+        assert!(
+            got("uv run fastapi dev")
+                .unwrap_err()
+                .to_string()
+                .contains("uvicorn")
+        );
         assert!(got("uv run").is_err());
+
+        let dir = std::env::temp_dir().join(format!("fnr-py-tool-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let venv_py = if cfg!(windows) {
+            dir.join(".venv").join("Scripts").join("python.exe")
+        } else {
+            dir.join(".venv").join("bin").join("python")
+        };
+        fs::create_dir_all(venv_py.parent().unwrap()).unwrap();
+        fs::write(&venv_py, "").unwrap();
+        let unwrapped = unwrap_python_tool(&cmd("pytest tests/"), &dir).unwrap();
+        assert_eq!(
+            unwrapped,
+            vec![
+                venv_py.to_string_lossy().into_owned(),
+                "-m".into(),
+                "pytest".into(),
+                "tests/".into()
+            ]
+        );
+        assert!(unwrap_python_tool(&cmd("python app.py"), &dir).is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
