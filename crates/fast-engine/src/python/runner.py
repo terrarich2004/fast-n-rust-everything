@@ -532,11 +532,11 @@ def dotted(node):
 
 
 def module_name(path, entry, base):
-    ap = os.path.abspath(path)
-    if entry and os.path.normcase(ap) == os.path.normcase(entry):
+    ap = os.path.realpath(path)
+    if entry and os.path.normcase(ap) == os.path.normcase(os.path.realpath(entry)):
         return "__main__"
     try:
-        rel = os.path.relpath(ap, base)
+        rel = os.path.relpath(ap, os.path.realpath(base))
     except ValueError:
         return None
     if rel.startswith(os.pardir) or not rel.endswith(".py"):
@@ -773,7 +773,7 @@ def describe(path, line, name, entry, base):
 
 def project_relative(root, path):
     try:
-        rel = os.path.relpath(os.path.abspath(path), root)
+        rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
     except ValueError:
         return None
     if rel == os.pardir or rel.startswith(os.pardir + os.sep):

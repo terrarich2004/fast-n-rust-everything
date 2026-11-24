@@ -1727,6 +1727,33 @@ setTimeout(() => { clearInterval(timer); }, 30000);
             "expected `spin` in timed profile, got: {:?}",
             prof.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
+        #[cfg(unix)]
+        {
+            let link =
+                std::env::temp_dir().join(format!("fnr-node-dur-link-{}", std::process::id()));
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(&dir, &link).unwrap();
+            let link_ctx = Ctx::open(&link).unwrap();
+            let link_prof = profile_with_options(
+                &link_ctx,
+                "node",
+                &["server.mjs".to_string()],
+                crate::backend::ProfileOptions {
+                    duration_secs: Some(1),
+                },
+            )
+            .unwrap();
+            assert!(
+                link_prof.functions.iter().any(|f| f.name == "spin"),
+                "expected `spin` through symlinked root, got: {:?}",
+                link_prof
+                    .functions
+                    .iter()
+                    .map(|f| &f.name)
+                    .collect::<Vec<_>>()
+            );
+            let _ = fs::remove_file(&link);
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

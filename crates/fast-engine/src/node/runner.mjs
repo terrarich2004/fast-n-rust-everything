@@ -1,10 +1,18 @@
 // Node side of fast-anything. The CLI copies this file to <project>/.fast/runner.mjs and runs
 //     node runner.mjs <mode> <job.json>
 // Modes: profile (analyse a V8 .cpuprofile), verify. Not meant to be run by hand.
-import { readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, statSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+function realPath(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
 
 const SKIP_DIRS = new Set([".fast", ".git", "node_modules"]);
 const IO =
@@ -151,8 +159,8 @@ function describe(file, line0, name, entry, root) {
   const warnings = [];
   let factor = 1;
   const indent = m[1].length;
-  const rel = path.relative(root, file);
-  const isEntry = entry && path.resolve(entry) === path.resolve(file);
+  const rel = path.relative(realPath(root), realPath(file));
+  const isEntry = entry && realPath(entry) === realPath(file);
   const module = isEntry ? "__main__" : rel.replace(/\.[cm]?[jt]sx?$/, "").split(path.sep).join(".");
   if (isEntry) {
     // like Python's if __name__ == "__main__": the main code must not run when verify imports the script
@@ -269,7 +277,7 @@ function describe(file, line0, name, entry, root) {
 }
 
 function projectRelative(root, file) {
-  const rel = path.relative(root, file);
+  const rel = path.relative(realPath(root), realPath(file));
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
   if (rel.split(path.sep).slice(0, -1).some((p) => SKIP_DIRS.has(p))) return null;
   return rel;
