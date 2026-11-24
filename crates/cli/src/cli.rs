@@ -45,26 +45,16 @@ pub enum KeepArg {
     about = "Rewrite the 5% that's slow — or lift the whole app to pure Rust. Proven against real behavior at every step.",
     arg_required_else_help = true,
     after_help = "\
-Fast 5% Hotspot Loop (Python, JS/TS/Bun/Deno, Ruby, Java, Kotlin, Go, PHP, C, C++, C#, R):
-  fnr go --agent claude -- python app.py
-  fnr scan -- python app.py
-  fnr port [id]
-  fnr verify [id] --gate
-  fnr enable [id]  |  fnr disable [id]
-  fnr bench        |  fnr report  |  fnr status
+Quick Start (IDE chat — Cursor, Claude Code, Antigravity, Windsurf, VS Code):
+  1. fnr setup                  # register MCP + skills once
+  2. fnr doctor                 # check Rust + your project runtime
+  3. Ask your AI agent: \"Profile and speed up this project with fast-n-rust\"
 
-Deep Unit Migration, Batching & Synergies:
-  fnr analyze .    |  fnr profile . -- node app.mjs
-  fnr escalate <id> [--batch fn:items]
-  fnr bridge . <unit> --batch fn:items
-  fnr record <crate>  ->  fnr build <crate>  ->  fnr diff <crate>  ->  fnr fuzz <crate>  ->  fnr gate <target>
+Or from the terminal:
+  fnr scan -- python3 app.py    # or: fnr scan -- npm run start
+  fnr go --agent claude -- python3 app.py
 
-Whole-App Pure Rust Rewrite:
-  fnr app record . -- python3 cli.py
-  fnr app front-door .  ->  fnr app wire . <unit>  ->  fnr app lift .
-
-Ops & Agents:
-  fnr setup  |  fnr doctor  |  fnr clean --cache  |  fnr mcp"
+Run `fnr commands` to see all 30 commands (batching, fuzzing, CI, packaging, whole-app lift)."
 )]
 pub struct Cli {
     /// Project folder (default: current directory).
@@ -208,6 +198,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Generate Markdown + SVG report card for the app or a unit crate.
+    #[command(hide = true)]
     Report {
         /// Optional path to a `rust/<crate>` directory.
         target: Option<PathBuf>,
@@ -226,6 +217,7 @@ pub enum Cmd {
 
     // --- Deep Unit Migration & Synergies ---
     /// Map a repository with AST analysis and produce a ranked migration plan.
+    #[command(hide = true)]
     Analyze {
         #[arg(default_value = ".")]
         root: PathBuf,
@@ -239,6 +231,7 @@ pub enum Cmd {
         whole_app: bool,
     },
     /// Profile a workload using runtime profilers and list callers + `--batch` opportunities.
+    #[command(hide = true)]
     Profile {
         #[arg(default_value = ".")]
         root: PathBuf,
@@ -250,6 +243,7 @@ pub enum Cmd {
         command: Vec<String>,
     },
     /// Promote a `.fast/ports/<id>` hotspot port into a full `rust/<name>` unit crate (supports `--batch`, `fuzz`, `shadow`, `gate`).
+    #[command(hide = true)]
     Escalate {
         /// Hotspot id (defaults to the only port if there is one).
         id: Option<String>,
@@ -260,6 +254,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Scaffold a `rust/<name>` unit crate with multi-language bindings and optional Rayon `--batch`.
+    #[command(hide = true)]
     Bridge {
         root: PathBuf,
         unit: String,
@@ -281,6 +276,7 @@ pub enum Cmd {
         allocator: bridge::Allocator,
     },
     /// Regenerate bindings from signatures in `src/port.rs`.
+    #[command(hide = true)]
     Refresh {
         #[arg(default_value = ".")]
         crate_dir: PathBuf,
@@ -288,6 +284,7 @@ pub enum Cmd {
         batch: Vec<String>,
     },
     /// Record edge cases, semantic traps, and optional test suite calls into `cases.jsonl`.
+    #[command(hide = true)]
     Record {
         #[arg(default_value = ".")]
         crate_dir: PathBuf,
@@ -307,6 +304,7 @@ pub enum Cmd {
         from_tests: Vec<String>,
     },
     /// Build a unit crate (or all hotspot ports when omitted).
+    #[command(hide = true)]
     Build {
         crate_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "host")]
@@ -327,6 +325,7 @@ pub enum Cmd {
         jni_libs: Option<PathBuf>,
     },
     /// Replay recorded cases against a unit crate's Rust module.
+    #[command(hide = true)]
     Diff {
         #[arg(default_value = ".")]
         crate_dir: PathBuf,
@@ -342,6 +341,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Property-fuzz a hotspot port (`.fast/ports/<id>`) or unit crate (`rust/<crate>`).
+    #[command(hide = true)]
     Fuzz {
         /// Hotspot id or path to `rust/<crate>` (defaults to `.` / single hotspot).
         target: Option<String>,
@@ -366,6 +366,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Generate a drop-in shadow module running original and Rust side by side.
+    #[command(hide = true)]
     Shadow {
         #[arg(default_value = ".")]
         crate_dir: PathBuf,
@@ -373,6 +374,7 @@ pub enum Cmd {
         out: Option<PathBuf>,
     },
     /// Strict Definition-of-Done check (`fmt`, `clippy -D warnings`, `cargo test`, `unsafe` SAFETY, parity) on a hotspot port OR unit crate.
+    #[command(hide = true)]
     Gate {
         /// Hotspot id or path to `rust/<crate>` (defaults to `.` / single hotspot).
         target: Option<String>,
@@ -382,6 +384,7 @@ pub enum Cmd {
         node_args: Vec<String>,
     },
     /// Run CI quality & speedup gate (`verify`, strict `gate`, optional `--fuzz`, `--bench`, `--min-speedup`).
+    #[command(hide = true)]
     Ci {
         /// Optional hotspot port id (default: all hotspot ports).
         target: Option<String>,
@@ -401,6 +404,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Generate a port map across all units and `rust/` crates.
+    #[command(hide = true)]
     Map {
         #[arg(default_value = ".")]
         repo: PathBuf,
@@ -414,6 +418,7 @@ pub enum Cmd {
         json: bool,
     },
     /// Package a verified hotspot port or unit crate for distribution (`dist/<ext>` / npm / wheel).
+    #[command(hide = true)]
     Package {
         /// Hotspot id or path to `rust/<crate>`.
         target: Option<String>,
@@ -440,6 +445,7 @@ pub enum Cmd {
 
     // --- Whole-App Pure Rust Migration ---
     /// Whole-app recording, replay, front-door scaffolding, wiring, and lift to pure Rust.
+    #[command(hide = true)]
     App {
         #[command(subcommand)]
         command: AppCmd,
@@ -447,6 +453,7 @@ pub enum Cmd {
 
     // --- Ops & Agent Integration ---
     /// Run as an MCP server over stdio (JSON-RPC 2.0; compact 7-tool mode by default, or `--all-tools` for 30 tools).
+    #[command(hide = true)]
     Mcp {
         /// Expose all 30 fine-grained legacy tools instead of the default 7 compact orchestrator tools.
         #[arg(long)]
@@ -490,7 +497,10 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// List all commands including deep unit-migration, fuzzing, CI, packaging, and whole-app lift.
+    Commands,
     /// Generate shell completion scripts for `fast-n-rust` and `fnr`.
+    #[command(hide = true)]
     Completions {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
@@ -820,9 +830,17 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                         },
                     )?;
                     if agent.is_none() {
+                        println!("\nPrepared `.fast/ports/` with recorded inputs and TASK.md:");
+                        for p in &outcome.ports {
+                            println!("  • {} ({})", p.id, p.crate_dir.display());
+                        }
                         println!(
-                            "\nNow write the Rust in each `src/lib.rs` (or `src/port.rs`), then:"
+                            "\nNext (in your IDE chat — Cursor, Claude Code, Antigravity, Windsurf, VS Code):"
                         );
+                        println!(
+                            "  Ask your agent: \"Implement the fast-n-rust port(s) in .fast/ports/ and verify them\""
+                        );
+                        println!("\nOr finish manually from the terminal:");
                         for p in &outcome.ports {
                             println!("  → fnr verify {} --gate && fnr enable {}", p.id, p.id);
                         }
@@ -1606,8 +1624,16 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                 print!("{}", clean::text(&out));
             }
         }
+        Cmd::Commands => {
+            println!("{}", all_commands_text());
+        }
         Cmd::Completions { shell } => {
             let mut cmd = Cli::command();
+            for sub in cmd.get_subcommands_mut() {
+                if sub.get_name() != "__replay" {
+                    *sub = std::mem::take(sub).hide(false);
+                }
+            }
             let bin = std::env::args()
                 .next()
                 .and_then(|a| {
@@ -1779,6 +1805,53 @@ fn run_app(cmd: AppCmd, root: &Path) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn all_commands_text() -> &'static str {
+    "\
+Everyday Workflow (IDE & Fast 5%):
+  fnr setup [--agent ...]       Register MCP + skills for Cursor, Claude Code, Antigravity, Windsurf, VS Code, Codex, Gemini, OpenCode
+  fnr doctor [--all]            Check Rust + project runtimes (or all 14 languages with --all)
+  fnr scan -- <cmd>             Profile workload, rank portable hotspots, and diagnose bottlenecks
+  fnr go [--agent ...] -- <cmd> Scan, port, verify, enable, and benchmark
+  fnr port [id]                 Record calls + scaffold `.fast/ports/<id>` with TASK.md
+  fnr verify [id] [--gate]      Replay recorded + edge cases (plus strict fmt/clippy/test/unsafe gate)
+  fnr enable [id] | disable     Switch on/off a verified port (reversible via FNR_DISABLE=1)
+  fnr bench                     Interleaved 95% CI + peak RSS benchmark
+  fnr status                    Show hotspot ports, `rust/` crates, and deploy readiness
+  fnr clean --cache|--all       Reclaim Cargo / `.fast/` build caches
+
+Deep Unit Migration, Batching & Fuzzing:
+  fnr analyze . [--whole-app]   AST migration map and ranked plan
+  fnr profile . -- <cmd>        List callers and Rayon `--batch` opportunities
+  fnr escalate <id> [--batch]   Promote a `.fast/` port into a `rust/` unit crate
+  fnr bridge . <unit> [--batch] Scaffold a `rust/` unit crate with bindings
+  fnr refresh <crate>           Regenerate bindings from `src/port.rs`
+  fnr record <crate>            Record edge cases and tests into `cases.jsonl`
+  fnr diff <crate>              Replay recorded cases against a unit crate
+  fnr fuzz [target]             Property / differential fuzzing with auto-shrinking
+  fnr shadow <crate>            Generate side-by-side shadow wrapper
+
+Whole-App Pure Rust Rewrite (`fnr app ...`):
+  fnr app record . -- <cmd>     Capture CLI or `--http` server behavior into `rust/app-cases/`
+  fnr app replay .              Replay recorded app cases against original or build
+  fnr app front-door .          Scaffold `rust/app` (`clap` / `axum`) with original fallback
+  fnr app wire . <unit>         Route commands/routes from front-door to ported Rust units
+  fnr app lift .                Strip fallback and emit standalone pure Rust binary
+
+Verification, CI & Packaging:
+  fnr build [crate | --deploy]  Build unit crate or deploy-build `.fast/ports/*` in CI/Docker
+  fnr gate [target]             Strict Definition-of-Done check (`fmt`, `clippy`, `test`, `unsafe`)
+  fnr ci [target]               One-shot CI parity/gate/fuzz/speedup pipeline
+  fnr package [target]          Package verified port into `dist/` (wheel / npm / native)
+  fnr report [target]           Generate Markdown report + SVG card
+  fnr map . [--write]           Generate `rust/PORT_MAP.md`
+
+Ops, MCP & Shell Completions:
+  fnr mcp [--all-tools]         Run JSON-RPC 2.0 MCP server (7 compact tools by default)
+  fnr completions <shell>       Generate bash/zsh/fish/powershell/elvish completions
+
+Tip: run `fnr <command> --help` for full flags on any command."
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1834,6 +1907,37 @@ mod tests {
 
         let mcp_full = Cli::try_parse_from(["fnr", "mcp", "--all-tools"]).unwrap();
         assert!(matches!(mcp_full.cmd, Cmd::Mcp { all_tools: true }));
+
+        let cmds = Cli::try_parse_from(["fnr", "commands"]).unwrap();
+        assert!(matches!(cmds.cmd, Cmd::Commands));
+
+        let doc_all = Cli::try_parse_from(["fnr", "doctor", "--all"]).unwrap();
+        assert!(matches!(doc_all.cmd, Cmd::Doctor { all: true, .. }));
+
+        for hidden in [
+            vec!["fnr", "analyze", "."],
+            vec!["fnr", "package"],
+            vec!["fnr", "report"],
+            vec!["fnr", "gate"],
+            vec!["fnr", "fuzz"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&hidden).is_ok(),
+                "hidden command should still parse: {hidden:?}"
+            );
+        }
+
+        let cmd_tree = Cli::command();
+        let visible: Vec<&str> = cmd_tree
+            .get_subcommands()
+            .filter(|s| !s.is_hide_set())
+            .map(|s| s.get_name())
+            .collect();
+        assert!(visible.contains(&"commands"));
+        assert!(visible.contains(&"setup"));
+        assert!(!visible.contains(&"escalate"));
+        assert!(!visible.contains(&"__replay"));
+        assert!(all_commands_text().contains("fnr app lift"));
     }
 
     #[test]
