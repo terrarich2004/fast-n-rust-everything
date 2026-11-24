@@ -452,7 +452,7 @@ pub enum Cmd {
         #[arg(long)]
         all_tools: bool,
     },
-    /// Register `fast-n-rust` MCP server and skills with AI coding agents (Claude, Codex, Cursor, Gemini, Antigravity, OpenCode).
+    /// Register `fast-n-rust` MCP server and skills with AI coding agents (Claude, Codex, Cursor, Windsurf, VS Code, Gemini, Antigravity, OpenCode).
     Setup {
         #[arg(long = "agent", value_enum)]
         agents: Vec<setup::Agent>,

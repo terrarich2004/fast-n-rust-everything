@@ -24,6 +24,9 @@ pub enum Agent {
     Claude,
     Codex,
     Cursor,
+    Windsurf,
+    #[value(name = "vscode")]
+    Vscode,
     Gemini,
     Antigravity,
     #[value(name = "opencode")]
@@ -31,10 +34,12 @@ pub enum Agent {
 }
 
 impl Agent {
-    pub const ALL: [Agent; 6] = [
+    pub const ALL: [Agent; 8] = [
         Agent::Claude,
         Agent::Codex,
         Agent::Cursor,
+        Agent::Windsurf,
+        Agent::Vscode,
         Agent::Gemini,
         Agent::Antigravity,
         Agent::OpenCode,
@@ -45,6 +50,8 @@ impl Agent {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
             Self::Cursor => "Cursor",
+            Self::Windsurf => "Windsurf",
+            Self::Vscode => "VS Code Copilot",
             Self::Gemini => "Gemini CLI",
             Self::Antigravity => "Antigravity",
             Self::OpenCode => "OpenCode",
@@ -56,6 +63,8 @@ impl Agent {
             Self::Claude => (".claude", "claude"),
             Self::Codex => (".codex", "codex"),
             Self::Cursor => (".cursor", "cursor"),
+            Self::Windsurf => (".codeium/windsurf", "windsurf"),
+            Self::Vscode => (".vscode", "code"),
             Self::Gemini => (".gemini", "gemini"),
             Self::Antigravity => (".gemini/antigravity", "antigravity"),
             Self::OpenCode => (".config/opencode", "opencode"),
@@ -63,23 +72,40 @@ impl Agent {
     }
 
     pub fn config(self, home: &Path) -> PathBuf {
-        home.join(match self {
-            Self::Claude => ".claude.json",
-            Self::Codex => ".codex/config.toml",
-            Self::Cursor => ".cursor/mcp.json",
-            Self::Gemini => ".gemini/settings.json",
-            Self::Antigravity => ".gemini/antigravity/mcp_config.json",
-            Self::OpenCode => ".config/opencode/opencode.json",
-        })
+        match self {
+            Self::Claude => home.join(".claude.json"),
+            Self::Codex => home.join(".codex/config.toml"),
+            Self::Cursor => home.join(".cursor/mcp.json"),
+            Self::Windsurf => home.join(".codeium/windsurf/mcp_config.json"),
+            Self::Vscode => {
+                #[cfg(target_os = "macos")]
+                {
+                    home.join("Library/Application Support/Code/User/mcp.json")
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    home.join("AppData/Roaming/Code/User/mcp.json")
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                {
+                    home.join(".config/Code/User/mcp.json")
+                }
+            }
+            Self::Gemini => home.join(".gemini/settings.json"),
+            Self::Antigravity => home.join(".gemini/antigravity/mcp_config.json"),
+            Self::OpenCode => home.join(".config/opencode/opencode.json"),
+        }
     }
 
     pub fn skill_dir(self, home: &Path) -> Option<PathBuf> {
         match self {
             Self::Claude => Some(home.join(".claude/skills").join(NAME)),
             Self::Codex => Some(home.join(".codex/skills").join(NAME)),
+            Self::Cursor => Some(home.join(".cursor/skills").join(NAME)),
+            Self::Windsurf => Some(home.join(".codeium/windsurf/skills").join(NAME)),
+            Self::Vscode => Some(home.join(".copilot/skills").join(NAME)),
             Self::Gemini | Self::Antigravity => Some(home.join(".gemini/config/skills").join(NAME)),
             Self::OpenCode => Some(home.join(".config/opencode/skills").join(NAME)),
-            Self::Cursor => None,
         }
     }
 }
@@ -102,7 +128,9 @@ fn on_path(bin: &str) -> bool {
 
 fn detected(home: &Path, agent: Agent) -> bool {
     let (dir, bin) = agent.markers();
-    home.join(dir).exists() || agent.config(home).exists() || on_path(bin)
+    let cfg = agent.config(home);
+    let vs_dir = agent == Agent::Vscode && cfg.parent().is_some_and(|p| p.exists());
+    home.join(dir).exists() || vs_dir || cfg.exists() || on_path(bin)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +163,14 @@ pub fn agent_detail(home: &Path, agent: Agent) -> AgentStatus {
                     .get("command")?
                     .as_array()?
                     .first()?
+                    .as_str()
+                    .map(str::to_string)
+            }),
+            Agent::Vscode => serde_json::from_str::<Value>(&text).ok().and_then(|v| {
+                v.get("servers")?
+                    .as_object()?
+                    .get(NAME)?
+                    .get("command")?
                     .as_str()
                     .map(str::to_string)
             }),
@@ -223,11 +259,18 @@ fn write_atomic(
     Ok(bak_path)
 }
 
+#[derive(Clone, Copy)]
+enum JsonMcpFormat {
+    Standard,
+    OpenCode,
+    VsCode,
+}
+
 fn update_json_mcp(
     path: &Path,
     command: &str,
     remove: bool,
-    opencode: bool,
+    fmt: JsonMcpFormat,
 ) -> Result<(bool, String)> {
     let existing = if path.exists() {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
@@ -242,44 +285,70 @@ fn update_json_mcp(
         .as_object_mut()
         .with_context(|| format!("{} must be a JSON object", path.display()))?;
 
-    let changed = if opencode {
-        let mcp = obj
-            .entry("mcp")
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .context("`mcp` must be an object")?;
-        if remove {
-            mcp.remove(NAME).is_some()
-        } else {
-            let desired = json!({
-                "type": "local",
-                "command": [command, "mcp"],
-                "enabled": true
-            });
-            let same = mcp.get(NAME) == Some(&desired);
-            mcp.insert(NAME.to_string(), desired);
-            !same
+    let changed = match fmt {
+        JsonMcpFormat::OpenCode => {
+            let mcp = obj
+                .entry("mcp")
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .context("`mcp` must be an object")?;
+            if remove {
+                mcp.remove(NAME).is_some()
+            } else {
+                let desired = json!({
+                    "type": "local",
+                    "command": [command, "mcp"],
+                    "enabled": true
+                });
+                let same = mcp.get(NAME) == Some(&desired);
+                mcp.insert(NAME.to_string(), desired);
+                !same
+            }
         }
-    } else {
-        let servers = obj
-            .entry("mcpServers")
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .context("`mcpServers` must be an object")?;
-        if remove {
-            servers.remove(NAME).is_some()
-        } else {
-            let mut entry = servers
-                .get(NAME)
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            entry.insert("command".into(), json!(command));
-            entry.insert("args".into(), json!(["mcp"]));
-            let new_val = Value::Object(entry);
-            let same = servers.get(NAME) == Some(&new_val);
-            servers.insert(NAME.to_string(), new_val);
-            !same
+        JsonMcpFormat::VsCode => {
+            let servers = obj
+                .entry("servers")
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .context("`servers` must be an object")?;
+            if remove {
+                servers.remove(NAME).is_some()
+            } else {
+                let mut entry = servers
+                    .get(NAME)
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                entry.insert("type".into(), json!("stdio"));
+                entry.insert("command".into(), json!(command));
+                entry.insert("args".into(), json!(["mcp"]));
+                let new_val = Value::Object(entry);
+                let same = servers.get(NAME) == Some(&new_val);
+                servers.insert(NAME.to_string(), new_val);
+                !same
+            }
+        }
+        JsonMcpFormat::Standard => {
+            let servers = obj
+                .entry("mcpServers")
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .context("`mcpServers` must be an object")?;
+            if remove {
+                servers.remove(NAME).is_some()
+            } else {
+                let mut entry = servers
+                    .get(NAME)
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                entry.insert("command".into(), json!(command));
+                entry.insert("args".into(), json!(["mcp"]));
+                let new_val = Value::Object(entry);
+                let same = servers.get(NAME) == Some(&new_val);
+                servers.insert(NAME.to_string(), new_val);
+                !same
+            }
         }
     };
 
@@ -334,7 +403,7 @@ pub fn setup(opts: &Options<'_>) -> Result<SetupReport> {
             .collect();
         if found.is_empty() {
             bail!(
-                "no supported AI coding agents detected on this machine (pass --agent claude|codex|cursor|gemini|antigravity|opencode)"
+                "no supported AI coding agents detected on this machine (pass --agent claude|codex|cursor|windsurf|vscode|gemini|antigravity|opencode)"
             );
         }
         found
@@ -349,8 +418,11 @@ pub fn setup(opts: &Options<'_>) -> Result<SetupReport> {
         let cfg = agent.config(opts.home);
         let (cfg_changed, next_text) = match agent {
             Agent::Codex => update_codex_toml(&cfg, &cmd_str, opts.remove)?,
-            Agent::OpenCode => update_json_mcp(&cfg, &cmd_str, opts.remove, true)?,
-            _ => update_json_mcp(&cfg, &cmd_str, opts.remove, false)?,
+            Agent::OpenCode => {
+                update_json_mcp(&cfg, &cmd_str, opts.remove, JsonMcpFormat::OpenCode)?
+            }
+            Agent::Vscode => update_json_mcp(&cfg, &cmd_str, opts.remove, JsonMcpFormat::VsCode)?,
+            _ => update_json_mcp(&cfg, &cmd_str, opts.remove, JsonMcpFormat::Standard)?,
         };
         let bak = if cfg_changed {
             write_atomic(&cfg, &next_text, opts.backup, opts.dry_run)?
@@ -421,6 +493,11 @@ pub fn text(r: &SetupReport) -> String {
         if let Some(ref s) = a.skill_dir {
             out.push_str(&format!("    skill: {}\n", s.display()));
         }
+    }
+    if !r.dry_run && !r.removed && !r.agents.is_empty() {
+        out.push_str(
+            "\nNext: open your project in your IDE and ask the agent: \"Profile and speed up this project with fast-n-rust\"\n",
+        );
     }
     out
 }
@@ -513,6 +590,100 @@ mod tests {
         assert!(claude_after["mcpServers"].get("fast-n-rust").is_none());
         assert!(claude_after["mcpServers"].get("other").is_some());
         assert!(!home.join(".claude/skills/fast-n-rust").exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn setup_configures_cursor_windsurf_and_vscode() {
+        let home = std::env::temp_dir().join(format!("fnr-ide-setup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::create_dir_all(home.join(".codeium/windsurf")).unwrap();
+
+        let vs_cfg = Agent::Vscode.config(&home);
+        std::fs::create_dir_all(vs_cfg.parent().unwrap()).unwrap();
+        std::fs::write(&vs_cfg, r#"{"servers":{"existing":{"command":"foo"}}}"#).unwrap();
+
+        let rep = setup(&Options {
+            home: &home,
+            agents: vec![Agent::Cursor, Agent::Windsurf, Agent::Vscode],
+            command: PathBuf::from("/usr/local/bin/fast-n-rust"),
+            remove: false,
+            dry_run: false,
+            backup: false,
+        })
+        .unwrap();
+        assert_eq!(rep.agents.len(), 3);
+        assert!(rep.agents.iter().all(|a| a.changed));
+        assert!(text(&rep).contains("Next: open your project in your IDE"));
+
+        // Cursor now installs both MCP and skills
+        assert!(home.join(".cursor/mcp.json").is_file());
+        assert!(home.join(".cursor/skills/fast-n-rust/SKILL.md").is_file());
+        assert_eq!(
+            agent_status(&home, Agent::Cursor, Path::new("fnr")),
+            (true, true)
+        );
+
+        // Windsurf installs mcp_config.json and skills
+        let windsurf: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".codeium/windsurf/mcp_config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            windsurf["mcpServers"]["fast-n-rust"]["args"],
+            json!(["mcp"])
+        );
+        assert!(
+            home.join(".codeium/windsurf/skills/fast-n-rust/SKILL.md")
+                .is_file()
+        );
+        assert_eq!(
+            agent_status(&home, Agent::Windsurf, Path::new("fnr")),
+            (true, true)
+        );
+
+        // VS Code preserves existing `servers` entries and writes type: stdio
+        let vscode: Value =
+            serde_json::from_str(&std::fs::read_to_string(&vs_cfg).unwrap()).unwrap();
+        assert!(vscode["servers"]["existing"].is_object());
+        assert_eq!(vscode["servers"]["fast-n-rust"]["type"], json!("stdio"));
+        assert_eq!(vscode["servers"]["fast-n-rust"]["args"], json!(["mcp"]));
+        assert!(home.join(".copilot/skills/fast-n-rust/SKILL.md").is_file());
+        assert_eq!(
+            agent_status(&home, Agent::Vscode, Path::new("fnr")),
+            (true, true)
+        );
+
+        // Idempotent second run
+        let rep2 = setup(&Options {
+            home: &home,
+            agents: vec![Agent::Cursor, Agent::Windsurf, Agent::Vscode],
+            command: PathBuf::from("/usr/local/bin/fast-n-rust"),
+            remove: false,
+            dry_run: false,
+            backup: false,
+        })
+        .unwrap();
+        assert!(rep2.agents.iter().all(|a| !a.changed));
+
+        // Clean removal preserves unrelated servers
+        setup(&Options {
+            home: &home,
+            agents: vec![Agent::Cursor, Agent::Windsurf, Agent::Vscode],
+            command: PathBuf::from("/usr/local/bin/fast-n-rust"),
+            remove: true,
+            dry_run: false,
+            backup: false,
+        })
+        .unwrap();
+        let vscode_after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&vs_cfg).unwrap()).unwrap();
+        assert!(vscode_after["servers"].get("existing").is_some());
+        assert!(vscode_after["servers"].get("fast-n-rust").is_none());
+        assert!(!home.join(".cursor/skills/fast-n-rust").exists());
+        assert!(!home.join(".codeium/windsurf/skills/fast-n-rust").exists());
+        assert!(!home.join(".copilot/skills/fast-n-rust").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 }
