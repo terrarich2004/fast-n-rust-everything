@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "fast-n-rust": {
+      "command": "fast-n-rust",
+      "args": ["mcp"]
+    }
+  }
+}

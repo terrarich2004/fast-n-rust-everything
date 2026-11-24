@@ -1,0 +1,32 @@
+# Rust & Cargo
+**/target/
+**/*.rs.bk
+
+# fast-n-rust / progenitor working state
+**/.fast/
+**/.fnr/
+**/.rust-anything/
+*.fast-n-rust.bak
+*.rust-anything.bak
+
+# Language build & runtime caches
+**/__pycache__/
+*.pyc
+**/.pytest_cache/
+**/.gradle/
+**/node_modules/
+npm/fast-n-rust/native/
+examples/**/bin/
+examples/**/obj/
+examples/**/build/
+examples/**/out/
+examples/**/dist/
+/dist/
+
+# Profiling & OS temp files
+*.profraw
+*.profdata
+*.bak
+*.orig
+*.swp
+.DS_Store

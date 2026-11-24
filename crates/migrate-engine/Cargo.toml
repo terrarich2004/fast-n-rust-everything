@@ -1,0 +1,50 @@
+[package]
+name = "fnr-migrate"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+repository.workspace = true
+description = "AST analysis, multi-language bridge, fuzz/diff/shadow/gate, and whole-app lift engine for fast-n-rust-everything"
+
+[lib]
+name = "fnr_migrate"
+path = "src/lib.rs"
+
+[features]
+default = []
+legacy-standalone = []
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+json5 = "1.3"
+oxc_allocator = "0.158"
+oxc_ast = "0.158"
+oxc_ast_visit = "0.158"
+oxc_parser = "0.158"
+oxc_span = "0.158"
+oxc_syntax = "0.158"
+percent-encoding = "2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: recorded floats must survive parsing bit for bit.
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "unbounded_depth"] }
+toml_edit = "0.25"
+tree-sitter = "0.27.2"
+tree-sitter-c = "0.24.2"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-go = "0.25.0"
+tree-sitter-java = "0.23.5"
+tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-php = "0.25.1"
+tree-sitter-powershell = "0.26.6"
+tree-sitter-python = "0.25.0"
+tree-sitter-ruby = "0.23.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

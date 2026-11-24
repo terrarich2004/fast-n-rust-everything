@@ -1,0 +1,21 @@
+[package]
+name = "fnr-fast"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
+license.workspace = true
+repository.workspace = true
+description = "Hotspot profiling, recording, verification, and inline swap engine for fast-n-rust-everything"
+
+[lib]
+name = "fnr_fast"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+libloading = "0.9.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip", "preserve_order"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

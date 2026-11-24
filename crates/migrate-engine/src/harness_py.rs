@@ -1,0 +1,611 @@
+//! The Python side of record, build, diff and bench: same cases, same markers, run by a
+//! Python driver instead of Node.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
+use serde_json::Value;
+
+use crate::bridge::Manifest;
+use crate::harness::{BenchRow, CASES, DiffOutcome};
+
+const WORK_DIR: &str = ".rust-anything";
+
+fn python() -> &'static str {
+    if Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        "python3"
+    } else {
+        "python"
+    }
+}
+
+fn run(cmd: &mut Command) -> Result<()> {
+    let _scratch = crate::harness::scratch_cwd(cmd)?;
+    let output = cmd.output().context("running python")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: Vec<&str> = stderr.lines().rev().take(25).collect();
+        bail!(
+            "python failed ({}):\n{}",
+            output.status,
+            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+        );
+    }
+    Ok(())
+}
+
+fn driver(crate_dir: &Path) -> Result<PathBuf> {
+    let work = crate_dir.join(WORK_DIR);
+    std::fs::create_dir_all(&work)?;
+    let path = work.join("driver.py");
+    std::fs::write(&path, DRIVER_PY)?;
+    Ok(path)
+}
+
+/// The unit's source files, written as a JSON list for the driver (a file, not an argument: any path
+/// survives, and a large unit cannot outgrow the command line): their packages stay importable during
+/// `diff`.
+fn source_files(crate_dir: &Path, manifest: &Manifest) -> Result<PathBuf> {
+    let files: std::collections::BTreeSet<&str> = manifest
+        .exports
+        .iter()
+        .map(|f| f.file.as_str())
+        .chain(manifest.classes.iter().map(|c| c.file.as_str()))
+        .collect();
+    let paths: Vec<String> = files
+        .into_iter()
+        .map(|f| manifest.root.join(f).to_string_lossy().into_owned())
+        .collect();
+    let path = crate_dir.join(WORK_DIR).join("diff-sources.json");
+    std::fs::write(&path, serde_json::to_string(&paths)?)?;
+    Ok(path)
+}
+
+/// The folder the wrapper package lives in, and the package name.
+pub fn package(crate_dir: &Path, manifest: &Manifest) -> (PathBuf, String) {
+    (crate_dir.join("python"), manifest.lib_name())
+}
+
+pub fn record(crate_dir: &Path, cases: &[Value]) -> Result<PathBuf> {
+    let driver = driver(crate_dir)?;
+    let out = crate_dir.join(CASES);
+    crate::harness::record_cases(
+        cases,
+        &crate_dir.join(WORK_DIR),
+        &out,
+        "python",
+        |inputs, part| {
+            let mut cmd = Command::new(python());
+            cmd.arg(&driver)
+                .arg("record")
+                .arg(inputs)
+                .arg(part)
+                .env("PYTHONHASHSEED", "0")
+                // Recording must not leave `__pycache__` folders in the source tree.
+                .env("PYTHONDONTWRITEBYTECODE", "1");
+            crate::pin::apply(&mut cmd, crate_dir)?;
+            crate::enable::original_only(&mut cmd, &Manifest::load(crate_dir)?);
+            Ok(cmd)
+        },
+    )?;
+    Ok(out)
+}
+
+pub fn build(crate_dir: &Path, manifest: &Manifest) -> Result<PathBuf> {
+    let target = crate::cache::target_for(crate_dir)?.dir;
+    let output = Command::new("cargo")
+        .args(["build", "--release", "--manifest-path"])
+        .arg(crate_dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .context("running cargo build")?;
+    if !output.status.success() {
+        bail!(
+            "cargo build failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let lib = manifest.lib_name();
+    let release = target.join("release");
+    let built = [
+        format!("lib{lib}.so"),
+        format!("lib{lib}.dylib"),
+        format!("{lib}.dll"),
+    ]
+    .iter()
+    .map(|n| release.join(n))
+    .find(|p| p.exists())
+    .with_context(|| format!("no extension module for `{lib}` in {}", release.display()))?;
+    let (dir, name) = package(crate_dir, manifest);
+    let package_dir = dir.join(&name);
+    std::fs::create_dir_all(&package_dir)?;
+    crate::harness::install(&built, &native_file(crate_dir, manifest))?;
+    Ok(package_dir)
+}
+
+/// The built extension module inside the Python package.
+pub(crate) fn native_file(crate_dir: &Path, manifest: &Manifest) -> PathBuf {
+    let (dir, name) = package(crate_dir, manifest);
+    dir.join(name).join(if cfg!(windows) {
+        "_native.pyd"
+    } else {
+        "_native.abi3.so"
+    })
+}
+
+pub fn diff(crate_dir: &Path, manifest: &Manifest, ignore_key_order: bool) -> Result<DiffOutcome> {
+    let cases = crate_dir.join(CASES);
+    if !cases.exists() {
+        bail!(
+            "no {CASES} in {} (run `rust-anything record` first)",
+            crate_dir.display()
+        );
+    }
+    let driver = driver(crate_dir)?;
+    let (dir, name) = package(crate_dir, manifest);
+    let out = crate_dir.join(WORK_DIR).join("diff.json");
+    let mut cmd = Command::new(python());
+    cmd.arg(&driver)
+        .arg("diff")
+        .arg(&cases)
+        .arg(&out)
+        .arg(dir)
+        .arg(name)
+        .arg(if ignore_key_order { "sort" } else { "keep" })
+        .arg(source_files(crate_dir, manifest)?)
+        .env("PYTHONHASHSEED", "0")
+        // Recording must not leave `__pycache__` folders in the source tree.
+        .env("PYTHONDONTWRITEBYTECODE", "1");
+    crate::pin::apply(&mut cmd, crate_dir)?;
+    crate::enable::original_only(&mut cmd, &Manifest::load(crate_dir)?);
+    run(&mut cmd)?;
+    Ok(serde_json::from_str(&std::fs::read_to_string(&out)?)?)
+}
+
+pub fn bench(crate_dir: &Path, manifest: &Manifest, min_ms: u64) -> Result<Vec<BenchRow>> {
+    let cases = crate_dir.join(CASES);
+    if !cases.exists() {
+        bail!(
+            "no {CASES} in {} (run `rust-anything record` first)",
+            crate_dir.display()
+        );
+    }
+    let driver = driver(crate_dir)?;
+    let (dir, name) = package(crate_dir, manifest);
+    let modules: serde_json::Map<String, Value> = manifest
+        .exports
+        .iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                Value::String(manifest.root.join(&f.file).to_string_lossy().into_owned()),
+            )
+        })
+        .chain(manifest.classes.iter().map(|c| {
+            (
+                c.name.clone(),
+                Value::String(manifest.root.join(&c.file).to_string_lossy().into_owned()),
+            )
+        }))
+        .collect();
+    let modules_path = crate_dir.join(WORK_DIR).join("bench-modules.json");
+    std::fs::write(&modules_path, serde_json::to_string(&modules)?)?;
+    let out = crate_dir.join(WORK_DIR).join("bench.json");
+    let mut cmd = Command::new(python());
+    crate::enable::original_only(&mut cmd, manifest);
+    run(cmd
+        .arg(&driver)
+        .arg("bench")
+        .arg(&cases)
+        .arg(&out)
+        .arg(dir)
+        .arg(name)
+        .arg(&modules_path)
+        .arg(min_ms.to_string())
+        .env("PYTHONHASHSEED", "0")
+        // Recording must not leave `__pycache__` folders in the source tree.
+        .env("PYTHONDONTWRITEBYTECODE", "1"))?;
+    Ok(serde_json::from_str(&std::fs::read_to_string(&out)?)?)
+}
+
+/// record / diff / bench for Python. Cases and markers match the Node scripts.
+pub const DRIVER_PY: &str = r#"
+import dataclasses
+import importlib
+import json
+import math
+import os
+import sys
+import time
+
+BIG = 2 ** 53
+
+
+def enc(v, stack=()):
+    if v is None or isinstance(v, (bool, str)):
+        return v
+    if isinstance(v, int):
+        return v if -BIG <= v <= BIG else {"$int": str(v)}
+    if isinstance(v, float):
+        if math.isnan(v):
+            return {"$num": "NaN"}
+        if math.isinf(v):
+            return {"$num": "Infinity" if v > 0 else "-Infinity"}
+        if v == 0 and math.copysign(1, v) < 0:
+            return {"$num": "-0"}
+        # 1.0 and 1 are different Python values: keep floats distinguishable. Through float.__repr__:
+        # a subclass (numpy.float64 under NumPy 2) has its own repr, "np.float64(0.0)", and float()
+        # would call its __float__.
+        return {"$float": float.__repr__(v)} if v.is_integer() else v
+    if any(v is s for s in stack):
+        return {"$cycle": True}
+    stack = stack + (v,)
+    if isinstance(v, list):
+        return [enc(x, stack) for x in v]
+    if isinstance(v, tuple):
+        return {"$tuple": [enc(x, stack) for x in v]}
+    if isinstance(v, (set, frozenset)):
+        return {"$set": sorted((enc(x, stack) for x in v), key=json.dumps)}
+    if isinstance(v, (bytes, bytearray)):
+        return {"$bytes": list(v)}
+    if isinstance(v, dict):
+        if all(isinstance(k, str) for k in v):
+            return {k: enc(x, stack) for k, x in v.items()}
+        return {"$dict": [[enc(k, stack), enc(x, stack)] for k, x in v.items()]}
+    if hasattr(v, "__dict__"):
+        return {"$object": type(v).__name__, "attrs": enc(vars(v), stack)}
+    return {"$repr": type(v).__name__}
+
+
+def dec(v):
+    if isinstance(v, list):
+        return [dec(x) for x in v]
+    if not isinstance(v, dict):
+        return v
+    if len(v) == 1:
+        (key, inner), = v.items()
+        if key == "$undefined":
+            return None
+        if key == "$num":
+            return {"NaN": math.nan, "Infinity": math.inf, "-Infinity": -math.inf, "-0": -0.0}[inner]
+        if key == "$float":
+            return float(inner)
+        if key == "$int":
+            return int(inner)
+        if key == "$tuple":
+            return tuple(dec(x) for x in inner)
+        if key == "$set":
+            return {dec(x) for x in inner}
+        if key == "$bytes":
+            return bytes(inner)
+        if key == "$dict":
+            return {dec(k): dec(x) for k, x in inner}
+    if set(v) == {"$object", "attrs"} and isinstance(v["attrs"], dict):
+        cls = dataclass_named(v["$object"])
+        if cls is not None:
+            return cls(**{k: dec(x) for k, x in v["attrs"].items()})
+    return {k: dec(x) for k, x in v.items()}
+
+
+def dataclass_named(name):
+    """A dataclass the loaded modules define, for building a recorded `$object` argument."""
+    for module in list(sys.modules.values()):
+        cls = getattr(module, name, None)
+        if isinstance(cls, type) and dataclasses.is_dataclass(cls):
+            return cls
+    return None
+
+
+PIN_CASE = None
+
+
+def pin_clock():
+    """With RUST_ANYTHING_NOW_MS set: a fixed clock and mulberry32 behind `random`, restarted
+    from RUST_ANYTHING_SEED by PIN_CASE before each case (see rust-anything's `pinned.rs`)."""
+    global PIN_CASE
+    now = os.environ.get("RUST_ANYTHING_NOW_MS")
+    if now is None:
+        return
+    import datetime as dt
+    import random as rnd
+    now_ms = int(now)
+    seconds = now_ms / 1000
+    seed = int(os.environ.get("RUST_ANYTHING_SEED", "0")) & 0xFFFFFFFF
+    time.time = lambda: seconds
+    time.time_ns = lambda: now_ms * 1_000_000
+    base_datetime, base_date = dt.datetime, dt.date
+
+    def pinned_type(base, methods):
+        class Meta(type):
+            def __instancecheck__(cls, obj):
+                return isinstance(obj, base)
+
+            def __subclasscheck__(cls, sub):
+                return issubclass(sub, base)
+
+        pinned = Meta(base.__name__, (base,), {k: classmethod(f) for k, f in methods.items()})
+        pinned.__module__ = base.__module__
+        return pinned
+
+    dt.datetime = pinned_type(base_datetime, {
+        "now": lambda cls, tz=None: base_datetime.fromtimestamp(seconds, tz),
+        "utcnow": lambda cls: base_datetime.fromtimestamp(seconds, dt.timezone.utc).replace(tzinfo=None),
+        "today": lambda cls: base_datetime.fromtimestamp(seconds),
+    })
+    dt.date = pinned_type(base_date, {"today": lambda cls: base_date.fromtimestamp(seconds)})
+    state = [seed]
+
+    def next_u32():
+        s = (state[0] + 0x6D2B79F5) & 0xFFFFFFFF
+        state[0] = s
+        t = ((s ^ (s >> 15)) * (s | 1)) & 0xFFFFFFFF
+        t ^= (t + ((t ^ (t >> 7)) * (t | 61))) & 0xFFFFFFFF
+        return t ^ (t >> 14)
+
+    class Pinned(rnd.Random):
+        def seed(self, *args, **kwargs):
+            self.gauss_next = None
+
+        def random(self):
+            return next_u32() / 4294967296
+
+        def getrandbits(self, k):
+            if k < 0:
+                raise ValueError("number of bits must be non-negative")
+            out, shift = 0, 0
+            while k > 0:
+                r = next_u32()
+                if k < 32:
+                    r >>= 32 - k
+                out |= r << shift
+                shift += 32
+                k -= 32
+            return out
+
+    inst = Pinned()
+    for name in rnd.__all__:
+        if not isinstance(getattr(rnd, name, None), type) and callable(getattr(inst, name, None)):
+            setattr(rnd, name, getattr(inst, name))
+
+    def pin_case(index):
+        state[0] = seed
+        inst.gauss_next = None
+        os.environ["RUST_ANYTHING_CASE"] = str(index)
+
+    PIN_CASE = pin_case
+
+
+def canon(v, sort):
+    return json.dumps(v, sort_keys=sort, ensure_ascii=False)
+
+
+def import_root(path):
+    """The folder a source file is imported from, with its package context, and its module name."""
+    path = os.path.abspath(path)
+    directory, filename = os.path.split(path)
+    parts = [os.path.splitext(filename)[0]]
+    while os.path.exists(os.path.join(directory, "__init__.py")):
+        directory, package = os.path.split(directory)
+        parts.insert(0, package)
+    if parts[-1] == "__init__":
+        parts.pop()
+    return directory, ".".join(parts)
+
+
+def load(path):
+    """Imports a source file with its package context, so relative imports work."""
+    directory, module = import_root(path)
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    return importlib.import_module(module)
+
+
+def error_text(e):
+    return f"{type(e).__name__}: {e}"
+
+
+def call_args(args):
+    """Trailing `undefined` arguments are omitted, so Python defaults apply."""
+    args = list(args)
+    while args and args[-1] == {"$undefined": True}:
+        args.pop()
+    return [dec(a) for a in args]
+
+
+def binding_name(name):
+    """The name the Rust bindings give a parameter: `bridge::snake_case`, without `r#`."""
+    out = []
+    for i, ch in enumerate(name):
+        if ch.isupper():
+            prev = name[i - 1] if i else ""
+            nxt = name[i + 1:i + 2]
+            if prev and (prev.islower() or "0" <= prev <= "9") or (prev.isupper() and nxt.islower()):
+                out.append("_")
+            out.append(ch.lower())
+        else:
+            out.append(ch if ch.isalnum() else "_")
+    return "".join(out)
+
+
+def call_kwargs(c, rename=None):
+    """Keyword arguments by their names in the original, or in the bindings with `rename`."""
+    return {(rename(k) if rename else k): dec(v) for k, v in c.get("kwargs", {}).items()}
+
+
+def shown_args(c):
+    """A case's arguments as mismatches show them: keyword arguments appended, as Ruby does."""
+    if c.get("class"):
+        return [c.get("ctor"), c.get("calls")]
+    return c["args"] + [c["kwargs"]] if c.get("kwargs") else c["args"]
+
+
+def run_case(mod, c, rename=None):
+    if c.get("class"):
+        cls = getattr(mod, c["class"])
+        results = []
+        try:
+            instance = cls(*call_args(c["ctor"]))
+            results.append({"ok": True})
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as e:  # noqa: BLE001
+            results.append({"error": error_text(e)})
+            return {"results": results}
+        for call in c["calls"]:
+            try:
+                results.append({"ok": enc(getattr(instance, call["method"])(*call_args(call["args"])))})
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:  # noqa: BLE001
+                results.append({"error": error_text(e)})
+        return {"results": results}
+    kwargs = call_kwargs(c, rename)
+    try:
+        return {"ok": enc(getattr(mod, c["fn"])(*call_args(c["args"]), **kwargs))}
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as e:  # noqa: BLE001
+        return {"error": error_text(e)}
+
+
+def record(inputs_path, out_path):
+    cases = json.load(open(inputs_path, encoding="utf-8"))
+    modules = {}
+    progress = os.environ.get("RUST_ANYTHING_PROGRESS")
+    with open(out_path, "w", encoding="utf-8") as out:
+        for index, c in enumerate(cases):
+            if progress:
+                with open(progress, "a", encoding="utf-8") as p:
+                    p.write("%d\n" % index)
+            if c["module"] not in modules:
+                modules[c["module"]] = load(c["module"])
+            if PIN_CASE:
+                PIN_CASE(index)
+            result = run_case(modules[c["module"]], c)
+            line = {k: c[k] for k in ("fn", "class", "ctor", "calls", "args", "kwargs") if k in c}
+            line.update(result)
+            out.write(json.dumps(line, ensure_ascii=False) + "\n")
+            out.flush()
+
+
+def native(package_dir, name):
+    sys.path.insert(0, package_dir)
+    return importlib.import_module(name)
+
+
+def error_type(text):
+    return text.split(":", 1)[0]
+
+
+def same(expected, actual, sort):
+    """Exception types are part of a Python contract and must match; a Rust `TypeError` means
+    the bindings rejected the arguments, which agrees with any error from the original."""
+    if "error" in expected or "error" in actual:
+        if not ("error" in expected and "error" in actual):
+            return False
+        return error_type(actual["error"]) in (error_type(expected["error"]), "TypeError")
+    return canon(expected.get("ok"), sort) == canon(actual.get("ok"), sort)
+
+
+def diff(cases_path, out_path, package_dir, name, key_order, sources_path=None):
+    mod = native(package_dir, name)
+    # The original's packages stay importable, as they are in the app: a port raises the
+    # original's own exception classes by importing them (`Err("pkg.errors.Bad: ...")`).
+    sources = json.load(open(sources_path, encoding="utf-8")) if sources_path else []
+    for source in sources:
+        directory = import_root(source)[0]
+        if directory not in sys.path:
+            sys.path.insert(0, directory)
+    sort = key_order == "sort"
+    summary = {"total": 0, "passed": 0, "failed": 0, "missing": [], "mismatches": []}
+    for index, line in enumerate(open(cases_path, encoding="utf-8")):
+        if not line.strip():
+            continue
+        c = json.loads(line)
+        summary["total"] += 1
+        name_ = c.get("class") or c["fn"]
+        if not hasattr(mod, name_):
+            if name_ not in summary["missing"]:
+                summary["missing"].append(name_)
+            summary["failed"] += 1
+            continue
+        if PIN_CASE:
+            PIN_CASE(index)
+        got = run_case(mod, c, binding_name)
+        if c.get("class"):
+            want, have = c["results"], got["results"]
+            ok = len(want) == len(have) and all(same(w, h, sort) for w, h in zip(want, have))
+            expected, actual = want, have
+        else:
+            expected = {"error": c["error"]} if "error" in c else {"ok": c.get("ok")}
+            ok = same(expected, got, sort)
+            actual = got
+        if ok:
+            summary["passed"] += 1
+        else:
+            summary["failed"] += 1
+            summary["mismatches"].append({"fn": name_, "args": shown_args(c), "expected": expected, "actual": actual})
+    json.dump(summary, open(out_path, "w", encoding="utf-8"), ensure_ascii=False)
+
+
+def bench(cases_path, out_path, package_dir, name, modules_path, min_ms):
+    new = native(package_dir, name)
+    sources = json.load(open(modules_path, encoding="utf-8"))
+    groups = {}
+    for line in open(cases_path, encoding="utf-8"):
+        if line.strip():
+            c = json.loads(line)
+            groups.setdefault(c.get("class") or c["fn"], []).append(c)
+    rows = []
+    for key, cases in groups.items():
+        if key not in sources or not hasattr(new, key):
+            continue
+        old = load(sources[key])
+
+        def timed(mod, rename=None):
+            if cases[0].get("class"):
+                def once():
+                    for c in cases:
+                        run_case(mod, c, rename)
+            else:
+                # Arguments are decoded once: only the calls are timed.
+                fn = getattr(mod, key)
+                prepared = [(call_args(c["args"]), call_kwargs(c, rename)) for c in cases]
+
+                def once():
+                    for args, kwargs in prepared:
+                        try:
+                            fn(*args, **kwargs)
+                        except (KeyboardInterrupt, SystemExit):
+                            raise
+                        except BaseException:  # noqa: BLE001
+                            pass
+            once()
+            passes, start = 0, time.perf_counter()
+            while True:
+                once()
+                passes += 1
+                elapsed = time.perf_counter() - start
+                if elapsed * 1000 >= min_ms:
+                    return elapsed * 1e9 / (passes * len(cases))
+        original_ns, rust_ns = timed(old), timed(new, binding_name)
+        label = f"class {key}" if cases[0].get("class") else key
+        rows.append({"fn": label, "cases": len(cases), "original_ns": original_ns, "rust_ns": rust_ns, "speedup": original_ns / rust_ns})
+    json.dump(rows, open(out_path, "w", encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    mode, *rest = sys.argv[1:]
+    pin_clock()
+    if mode == "record":
+        record(*rest)
+    elif mode == "diff":
+        diff(*rest)
+    elif mode == "bench":
+        bench(rest[0], rest[1], rest[2], rest[3], rest[4], int(rest[5]))
+"#;

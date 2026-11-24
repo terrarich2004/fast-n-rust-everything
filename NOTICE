@@ -1,0 +1,39 @@
+THIRD-PARTY NOTICES AND ATTRIBUTION
+
+`fast-n-rust-everything` (`fast-n-rust` / `fnr`) builds directly upon two MIT-licensed
+open-source projects and combines their engines into a unified CLI and MCP server:
+
+1. rust-anything (v3.3.0)
+   Repository: https://github.com/erkamyaman/rust-anything
+   Author: Erkam Yaman (erkamyaman)
+   License: MIT
+   Incorporated into: `crates/migrate-engine/` (AST analysis, multi-language bridges,
+   Rayon batching, semantic-trap recording, diff, fuzz, shadow, gate, packaging,
+   whole-app front-door / wire / lift).
+
+2. fast-anything (v0.8.5)
+   Repository: https://github.com/EL4CTEO/fast-anything
+   Author: EL4CTEO
+   License: MIT
+   Incorporated into: `crates/fast-engine/` and `examples/` (hotspot profiling across
+   Python, JS/TS/Bun/Deno, Ruby, Java, Kotlin, Go, PHP, C, C++, C#, R; up to 500
+   real call recording + shrink/edge-case synthesis; fast one-function inline swap
+   and interleaved app benchmarking).
+
+What `fast-n-rust-everything` adds on top (`crates/cli/` and engine upgrades):
+- Unified `fast-n-rust` and `fnr` binaries + 29-tool threaded MCP server with 4 prompts
+- Cross-engine synergies (`synergy.rs`):
+  * Mode Advisor (`fast` 5% vs `--batch` Rayon vs `whole-app`)
+  * `TASK.md` enrichment with static risk detection & `crates.toml` suggestions
+  * `fnr escalate <id>`: promote a `.fast/ports/<id>` port into a `rust/` unit crate
+  * `fnr verify --gate` and `fnr go --strict` running `fmt`, `clippy -D warnings`,
+    `cargo test`, and `unsafe` SAFETY-comment checks on hotspot ports
+  * Auto-detection of `.fast` hotspot ports vs `rust/` unit crates in `gate`, `enable`,
+    `disable`, `bench`, and `report`
+- Unified `doctor` (all 14 languages, AI coding agents, cache disk usage)
+- Unified `setup` (Claude Code, Codex, Cursor, Gemini CLI, Antigravity, OpenCode)
+- Safe `clean` command (`--cache`, `--ports`, `--rust`, `--all`, `--dry-run`)
+- Dual kill-switch compatibility (`FNR_DISABLE=1` alongside `FAST_ANYTHING_DISABLE=1`
+  and `RUST_ANYTHING_MODE=old`)
+- Fixes for upstream issues (rust-anything #288, #289, #290, #291, #300, #301 and
+  fast-anything #76).

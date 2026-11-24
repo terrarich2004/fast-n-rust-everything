@@ -1,0 +1,19 @@
+{
+  "name": "fast-n-rust",
+  "version": "0.1.0",
+  "description": "Rewrite the 5% that's slow — or lift the whole app to pure Rust. Proven against real behavior across 14 languages.",
+  "license": "MIT",
+  "keywords": [
+    "rust",
+    "performance",
+    "migration",
+    "mcp",
+    "profiling",
+    "pyo3",
+    "napi-rs",
+    "ffi"
+  ],
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "mcpServers": "./.mcp.json"
+}

@@ -1,0 +1,13 @@
+{
+  "name": "fast-n-rust",
+  "owner": {
+    "name": "terrarich2004"
+  },
+  "plugins": [
+    {
+      "name": "fast-n-rust",
+      "source": "./",
+      "description": "Rewrite the 5% that's slow — or lift the whole app to pure Rust. Proven against real behavior across 14 languages."
+    }
+  ]
+}

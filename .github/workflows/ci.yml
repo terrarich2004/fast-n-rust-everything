@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    name: Workspace lint & tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting (workspace)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
+      - name: Clippy (workspace, strict)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace
+
+  python-e2e:
+    name: Live E2E (Python fuzzy-dedupe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fnr
+        run: cargo build --bin fnr
+      - name: Run full 5% hotspot loop on temp copy
+        run: |
+          WORK=$(mktemp -d)
+          cp -r examples/fuzzy-dedupe "$WORK/app"
+          FNR="$PWD/target/debug/fnr"
+          "$FNR" -C "$WORK/app" scan -- python3 app.py
+          "$FNR" -C "$WORK/app" port
+          cp "$WORK/app/reference/lib.rs" "$WORK/app/.fast/ports/"*/src/lib.rs
+          "$FNR" -C "$WORK/app" verify --gate
+          "$FNR" -C "$WORK/app" fuzz --cases 20
+          "$FNR" -C "$WORK/app" enable
+          "$FNR" -C "$WORK/app" bench --runs 3
+          "$FNR" -C "$WORK/app" disable
+          rm -rf "$WORK"
+
+  node-launcher:
+    name: Node npm launcher & installer tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test npm launcher
+        run: node --test npm/fast-n-rust/bin/fast-n-rust.test.js

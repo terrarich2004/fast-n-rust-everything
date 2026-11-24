@@ -1,0 +1,39 @@
+[package]
+name = "fast-n-rust"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "Rewrite the 5% that's slow — or lift the whole app to pure Rust. Proven against real behavior at every step."
+keywords = ["rust", "performance", "migration", "mcp", "ai-agents"]
+categories = ["command-line-utilities", "development-tools", "development-tools::profiling"]
+
+[lib]
+name = "fast_n_rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fast-n-rust"
+path = "src/main.rs"
+
+[[bin]]
+name = "fnr"
+path = "src/bin/fnr.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+fnr-fast = { path = "../fast-engine" }
+fnr-migrate = { path = "../migrate-engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
+toml_edit = "0.25"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

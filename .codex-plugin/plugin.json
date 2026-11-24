@@ -1,0 +1,8 @@
+{
+  "name": "fast-n-rust",
+  "version": "0.1.0",
+  "description": "Unified 5% hotspot Rust optimizer + incremental whole-app Rust migrator with behavioral proof across 14 languages.",
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

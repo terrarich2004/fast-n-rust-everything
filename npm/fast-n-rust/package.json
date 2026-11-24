@@ -1,0 +1,43 @@
+{
+  "name": "fast-n-rust",
+  "version": "0.1.0",
+  "description": "Rewrite the 5% that's slow — or lift the whole app to pure Rust. Proven against real behavior at every step.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/terrarich2004/fast-n-rust-everything.git",
+    "directory": "npm/fast-n-rust"
+  },
+  "homepage": "https://github.com/terrarich2004/fast-n-rust-everything",
+  "bin": {
+    "fast-n-rust": "bin/fast-n-rust.js",
+    "fnr": "bin/fast-n-rust.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js",
+    "test": "node --test bin/fast-n-rust.test.js"
+  },
+  "files": [
+    "bin/",
+    "install.js"
+  ],
+  "optionalDependencies": {
+    "@fast-n-rust/linux-x64": "0.1.0",
+    "@fast-n-rust/linux-arm64": "0.1.0",
+    "@fast-n-rust/darwin-arm64": "0.1.0",
+    "@fast-n-rust/darwin-x64": "0.1.0",
+    "@fast-n-rust/win32-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "rust",
+    "performance",
+    "migration",
+    "mcp",
+    "profiling",
+    "pyo3",
+    "napi-rs"
+  ]
+}
