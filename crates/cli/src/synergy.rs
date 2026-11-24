@@ -2633,6 +2633,105 @@ pub struct PortStatusRow {
     pub per_call_speedup: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeployAudit {
+    pub host_target: String,
+    pub enabled_ports: usize,
+    pub detected_targets: Vec<String>,
+    pub warnings: Vec<String>,
+    pub recommendations: Vec<String>,
+}
+
+pub fn audit_deploy(root: &Path) -> DeployAudit {
+    let host_target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let mut enabled_langs = Vec::new();
+    if root.join(".fast/state.json").is_file()
+        && let Ok(ctx) = Ctx::open(root)
+    {
+        for p in ctx.state.ports.values().filter(|p| p.enabled) {
+            enabled_langs.push(p.lang);
+        }
+    }
+    let enabled_ports = enabled_langs.len();
+    let mut detected_targets = Vec::new();
+    let mut warnings = Vec::new();
+    let mut recommendations = Vec::new();
+
+    let dockerfile = root.join("Dockerfile");
+    let has_docker = dockerfile.is_file();
+    if has_docker {
+        detected_targets.push("docker".to_string());
+    }
+    let has_vercel = root.join("vercel.json").is_file()
+        || [
+            "next.config.js",
+            "next.config.mjs",
+            "next.config.ts",
+            "next.config.cjs",
+        ]
+        .iter()
+        .any(|f| root.join(f).is_file())
+        || root.join("netlify.toml").is_file();
+    if has_vercel {
+        detected_targets.push("serverless/edge".to_string());
+    }
+    let has_paas = ["railway.json", "nixpacks.toml", "fly.toml", "render.yaml"]
+        .iter()
+        .any(|f| root.join(f).is_file());
+    if has_paas {
+        detected_targets.push("paas".to_string());
+    }
+
+    if enabled_ports == 0 {
+        return DeployAudit {
+            host_target,
+            enabled_ports,
+            detected_targets,
+            warnings,
+            recommendations,
+        };
+    }
+
+    recommendations.push(format!(
+        "Built binaries live in `.fast/lib/` (gitignored, compiled for `{host_target}` only). Commit `.fast/ports/` sources and run `fnr build --deploy` on the target host or CI/Docker."
+    ));
+
+    if has_docker {
+        let content = fs::read_to_string(&dockerfile).unwrap_or_default();
+        if !content.contains("build --deploy") {
+            warnings.push(
+                "`Dockerfile` does not run `fnr build --deploy` — containers may silently fall back to the slower original code.".to_string(),
+            );
+            recommendations.push(
+                "Add `RUN fnr build --deploy` and `ENV FNR_STRICT=1` to `Dockerfile`.".to_string(),
+            );
+        }
+    }
+
+    if has_vercel && enabled_langs.contains(&FastLang::Node) {
+        warnings.push(
+            "Serverless/Edge platforms (Vercel, Next.js, Netlify) generally cannot load local `.node` native addons.".to_string(),
+        );
+        recommendations.push(
+            "Deploy on a container/VPS with `fnr build --deploy`, or target WASM (`fnr escalate <id>` + `fnr bridge --kind wasm`).".to_string(),
+        );
+    }
+
+    if has_paas {
+        recommendations.push(
+            "In your PaaS build command, run `fnr build --deploy` and set `FNR_STRICT=1` so missing binaries fail loudly instead of silently falling back.".to_string(),
+        );
+    }
+
+    DeployAudit {
+        host_target,
+        enabled_ports,
+        detected_targets,
+        warnings,
+        recommendations,
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct UnifiedStatus {
     pub has_fast: bool,
@@ -2641,6 +2740,8 @@ pub struct UnifiedStatus {
     pub hotspots: Vec<PortStatusRow>,
     pub units: Option<fnr_migrate::port_map::PortMap>,
     pub bench: Option<BenchResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy: Option<DeployAudit>,
 }
 
 /// Collects both `.fast/state.json` hotspot ports (transport tier, build profile, verify) and `rust/` unit crates.
@@ -2696,6 +2797,10 @@ pub fn unified_status(root: &Path) -> Result<UnifiedStatus> {
         (FastLang::default(), 0.0, None, Vec::new())
     };
     let units = fnr_migrate::port_map::map(root, &[]).ok();
+    let deploy = {
+        let audit = audit_deploy(root);
+        (audit.enabled_ports > 0).then_some(audit)
+    };
     Ok(UnifiedStatus {
         has_fast,
         app_lang,
@@ -2703,6 +2808,7 @@ pub fn unified_status(root: &Path) -> Result<UnifiedStatus> {
         hotspots,
         units,
         bench,
+        deploy,
     })
 }
 
@@ -3214,5 +3320,71 @@ mod tests {
             "{spliced_ts}"
         );
         assert!(!spliced_ts.contains("use napi"), "{spliced_ts}");
+    }
+
+    #[test]
+    fn audit_deploy_detects_docker_and_serverless_risks() {
+        let root = std::env::temp_dir().join(format!("fnr-deploy-audit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        // 1. Clean repo without enabled ports: no warnings, no `.fast/` created
+        let empty = audit_deploy(&root);
+        assert_eq!(empty.enabled_ports, 0);
+        assert!(empty.warnings.is_empty());
+        assert!(!root.join(".fast").exists());
+
+        // 2. Enabled JS/TS port + Dockerfile missing --deploy + vercel.json
+        let mut ctx = Ctx::open(&root).unwrap();
+        ctx.state.ports.insert(
+            "fuzzy.dedupe".into(),
+            fnr_fast::state::Port {
+                id: "fuzzy.dedupe".into(),
+                lang: FastLang::Node,
+                enabled: true,
+                ..fnr_fast::state::Port::default()
+            },
+        );
+        ctx.save().unwrap();
+        fs::write(
+            root.join("Dockerfile"),
+            "FROM node:22\nCMD [\"node\", \"app.js\"]\n",
+        )
+        .unwrap();
+        fs::write(root.join("vercel.json"), "{}\n").unwrap();
+
+        let rep = audit_deploy(&root);
+        assert_eq!(rep.enabled_ports, 1);
+        assert!(rep.detected_targets.contains(&"docker".to_string()));
+        assert!(
+            rep.detected_targets
+                .contains(&"serverless/edge".to_string())
+        );
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("fnr build --deploy")),
+            "{:?}",
+            rep.warnings
+        );
+        assert!(
+            rep.warnings.iter().any(|w| w.contains("Serverless/Edge")),
+            "{:?}",
+            rep.warnings
+        );
+
+        // 3. Dockerfile with `fnr build --deploy` clears the Docker warning
+        fs::write(
+            root.join("Dockerfile"),
+            "FROM node:22\nRUN fnr build --deploy\nENV FNR_STRICT=1\n",
+        )
+        .unwrap();
+        let rep2 = audit_deploy(&root);
+        assert!(
+            !rep2.warnings.iter().any(|w| w.contains("Dockerfile")),
+            "{:?}",
+            rep2.warnings
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

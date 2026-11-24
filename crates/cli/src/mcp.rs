@@ -1345,7 +1345,8 @@ fn call_with_default_root(name: &str, args: &Value, default_root: &Path) -> Resu
                         pgo,
                         native_cpu,
                     )?;
-                    json!({ "enabled": enabled_id, "pgo": pgo, "native_cpu": native_cpu })
+                    let deploy = synergy::audit_deploy(&root);
+                    json!({ "enabled": enabled_id, "pgo": pgo, "native_cpu": native_cpu, "deploy": deploy })
                 }
             }
         }

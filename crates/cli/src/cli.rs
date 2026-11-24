@@ -929,15 +929,22 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                     pgo,
                     native_cpu,
                 )?;
+                let deploy = synergy::audit_deploy(root);
                 if json {
                     println!(
                         "{}",
                         serde_json::to_string_pretty(
-                            &json!({ "enabled": eid, "pgo": pgo, "native_cpu": native_cpu })
+                            &json!({ "enabled": eid, "pgo": pgo, "native_cpu": native_cpu, "deploy": deploy })
                         )?
                     );
                 } else {
                     println!("Enabled hotspot `{eid}` (set FNR_DISABLE=1 to run original)");
+                    for w in &deploy.warnings {
+                        println!("  ! {w}");
+                    }
+                    for rec in deploy.recommendations.iter().take(2) {
+                        println!("  deploy: {rec}");
+                    }
                 }
             }
         },
@@ -1121,6 +1128,15 @@ fn dispatch(cmd: Cmd, root: &Path) -> Result<ExitCode> {
                     && (!m.ports.is_empty() || !m.not_ported.is_empty())
                 {
                     println!("\n{}", port_map::markdown(&m));
+                }
+                if let Some(deploy) = &st.deploy {
+                    println!("\nDeploy readiness ({}):", deploy.host_target);
+                    for w in &deploy.warnings {
+                        println!("  ! {w}");
+                    }
+                    for rec in &deploy.recommendations {
+                        println!("  • {rec}");
+                    }
                 }
             }
         }
