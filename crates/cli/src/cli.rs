@@ -1835,19 +1835,15 @@ mod tests {
 
     #[test]
     fn resolve_in_honors_dir_and_app_json_is_silent() {
-        let root = Path::new("/tmp/fnr-ws");
+        let base = abs(&std::env::temp_dir());
+        let root = base.join("fnr-ws");
+        let other = base.join("other");
+        assert_eq!(resolve_in(&root, Path::new(".")), root);
         assert_eq!(
-            resolve_in(root, Path::new(".")),
-            PathBuf::from("/tmp/fnr-ws")
+            resolve_in(&root, Path::new("rust/demo")),
+            abs(&root.join("rust/demo"))
         );
-        assert_eq!(
-            resolve_in(root, Path::new("rust/demo")),
-            PathBuf::from("/tmp/fnr-ws/rust/demo")
-        );
-        assert_eq!(
-            resolve_in(root, Path::new("/opt/other")),
-            PathBuf::from("/opt/other")
-        );
+        assert_eq!(resolve_in(&root, &other), other);
 
         let lift_json = Cli::try_parse_from(["fnr", "app", "lift", "--json"]).unwrap();
         assert!(is_silent_cmd(&lift_json.cmd));
